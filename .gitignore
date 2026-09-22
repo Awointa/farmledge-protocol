@@ -1,0 +1,7 @@
+/target
+**/target
+Cargo.lock.bak
+test_snapshots/
+.DS_Store
+*.wasm
+!*.optimized.wasm

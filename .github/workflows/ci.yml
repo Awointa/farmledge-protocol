@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install stellar-cli
+        run: cargo install --locked stellar-cli --version 28.0.0
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      # Not -D warnings yet: many functions are still TODO-stubbed (see
+      # README "Current state"), which legitimately trips dead_code and
+      # unused-variable lints until each is implemented.
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: stellar contract build
+        run: stellar contract build
