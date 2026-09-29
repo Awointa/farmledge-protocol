@@ -1,13 +1,20 @@
 #![cfg(test)]
 
 mod exit;
+mod lock;
 mod mint;
+mod prop_lending;
 mod prop_split;
+mod recovery;
 mod registry;
 mod revoke;
 mod ttl;
+mod unlock;
 
-use soroban_sdk::{testutils::Address as _, Address, Env, String, Symbol};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger as _},
+    Address, Env, String, Symbol,
+};
 
 use crate::{ReceiptContract, ReceiptContractClient, Status, WeightSource};
 
@@ -93,6 +100,22 @@ impl Fixture<'_> {
     }
 
     pub fn mint_weighing(&self, env: &Env, deposit_id: &str, weight_kg: u64, bags: u32) -> u64 {
+        self.mint_with(env, deposit_id, weight_kg, bags, WeightSource::Scale)
+    }
+
+    /// Mints a 2,000kg / 20-bag lot whose weight is a bag-count estimate.
+    pub fn mint_bag_estimate(&self, env: &Env, deposit_id: &str) -> u64 {
+        self.mint_with(env, deposit_id, 2_000, 20, WeightSource::BagEstimate)
+    }
+
+    fn mint_with(
+        &self,
+        env: &Env,
+        deposit_id: &str,
+        weight_kg: u64,
+        bags: u32,
+        source: WeightSource,
+    ) -> u64 {
         self.client.mint(
             &self.custodian,
             &self.verifier,
@@ -102,10 +125,71 @@ impl Fixture<'_> {
             &Symbol::new(env, COMMODITY),
             &Symbol::new(env, GRADE),
             &weight_kg,
-            &WeightSource::Scale,
+            &source,
             &bags,
             &MOISTURE,
         )
+    }
+}
+
+// --- lending ---------------------------------------------------------------
+
+/// Ledger time every lending test starts at.
+pub const NOW: u64 = 1_700_000_000;
+/// Loan falls due 30 days after `NOW`...
+pub const DUE: u64 = NOW + 30 * 86_400;
+/// ...with 7 days' grace, so recovery opens at `DUE + GRACE + 1`.
+pub const GRACE: u64 = 7 * 86_400;
+pub const LOAN_REF: &str = "LOAN-0001";
+
+/// A `setup` fixture plus a lender and a registered recovery operator, with
+/// the ledger clock at `NOW`.
+pub struct Lending<'a> {
+    pub f: Fixture<'a>,
+    pub lender: Address,
+    pub operator: Address,
+}
+
+pub fn setup_lending(env: &Env) -> Lending<'_> {
+    let f = setup(env);
+    env.ledger().set_timestamp(NOW);
+    let lender = Address::generate(env);
+    let operator = Address::generate(env);
+    f.client.add_recovery_operator(&operator);
+    Lending {
+        f,
+        lender,
+        operator,
+    }
+}
+
+impl Lending<'_> {
+    /// Locks `kg` of `receipt_id` to `self.lender` on the standard terms.
+    pub fn lock(&self, env: &Env, receipt_id: u64, kg: u64) -> u64 {
+        self.f.client.lock(
+            &receipt_id,
+            &self.lender,
+            &kg,
+            &String::from_str(env, LOAN_REF),
+            &DUE,
+            &GRACE,
+        )
+    }
+
+    /// Advances the clock past the grace period and starts recovery.
+    pub fn default_and_recover(&self, env: &Env, receipt_id: u64) {
+        env.ledger().set_timestamp(DUE + GRACE + 1);
+        self.f.client.start_recovery(&receipt_id);
+    }
+
+    pub fn complete(&self, env: &Env, receipt_id: u64, buyer: &Address) {
+        self.f.client.complete_recovery(
+            &receipt_id,
+            &self.operator,
+            buyer,
+            &String::from_str(env, "SALE-1"),
+            &String::from_str(env, "SETTLE-1"),
+        );
     }
 }
 
@@ -127,4 +211,40 @@ pub fn live_weight(f: &Fixture, highest_id: u64) -> u64 {
 /// Total bag count still accounted for across the split tree.
 pub fn live_bags(f: &Fixture, highest_id: u64) -> u32 {
     leaves(f, highest_id).iter().map(|r| r.bag_count).sum()
+}
+
+/// Replaces all mocked auth with exactly `signers` authorising one call of
+/// `fn_name(args)`. Anyone not listed has not signed.
+pub fn sign_only(
+    env: &Env,
+    contract: &Address,
+    fn_name: &str,
+    args: soroban_sdk::Vec<soroban_sdk::Val>,
+    signers: &[&Address],
+) {
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+
+    let invoke = MockAuthInvoke {
+        contract,
+        fn_name,
+        args,
+        sub_invokes: &[],
+    };
+    let auths: std::vec::Vec<MockAuth> = signers
+        .iter()
+        .map(|address| MockAuth {
+            address,
+            invoke: &invoke,
+        })
+        .collect();
+    env.mock_auths(&auths);
+}
+
+/// One past the highest receipt id allocated so far.
+pub fn next_id(f: &Fixture) -> u64 {
+    let mut id = 1;
+    while f.client.try_get_receipt(&id).is_ok() {
+        id += 1;
+    }
+    id
 }

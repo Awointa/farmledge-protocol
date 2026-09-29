@@ -65,10 +65,6 @@ pub fn is_verifier(env: &Env, verifier: &Address) -> bool {
     found
 }
 
-/// Written now, read by `complete_recovery` next session. Registration is
-/// already reachable through `add_recovery_operator`, so the data is live
-/// even though nothing on the public surface reads it back yet.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn is_recovery_operator(env: &Env, operator: &Address) -> bool {
     let key = DataKey::RecoveryOperator(operator.clone());
     let found = env.storage().persistent().has(&key);

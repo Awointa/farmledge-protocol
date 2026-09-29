@@ -10,9 +10,11 @@
 //! long-term has to be derivable from receipts in storage, and it is: every
 //! event here is a projection of a `Receipt` that remains readable.
 //!
-//! The lending events (`locked`, `unlocked`, `due_extended`,
-//! `recovery_started`, `recovery_completed`) land with their functions next
-//! session. Adding an event is free — it is not stored state.
+//! Every lending event carries `receipt_id` and `lender` as topics, plus the
+//! receipt's `kg` and the timestamps of the transition, so the backend
+//! indexer can follow a loan without reading storage. A partial lock or
+//! unlock is preceded in the same transaction by a `Split` event linking the
+//! new ids to their parent.
 
 use soroban_sdk::{contractevent, Address, Env, String, Symbol};
 
@@ -61,6 +63,77 @@ pub struct Revoked {
 pub struct TtlExtended {
     #[topic]
     pub receipt_id: u64,
+}
+
+#[contractevent]
+pub struct Locked {
+    #[topic]
+    pub receipt_id: u64,
+    #[topic]
+    pub lender: Address,
+    pub owner: Address,
+    pub kg: u64,
+    pub loan_ref: String,
+    pub due_date: u64,
+    pub grace_period: u64,
+    pub locked_at: u64,
+}
+
+/// `receipt_id` is the released receipt. On a partial unlock
+/// `remaining_receipt_id` is the portion still `Locked` / in `Recovery`.
+#[contractevent]
+pub struct Unlocked {
+    #[topic]
+    pub receipt_id: u64,
+    #[topic]
+    pub lender: Address,
+    pub owner: Address,
+    pub kg: u64,
+    pub partial: bool,
+    pub remaining_receipt_id: Option<u64>,
+    pub from_recovery: bool,
+    pub unlocked_at: u64,
+}
+
+#[contractevent]
+pub struct DueExtended {
+    #[topic]
+    pub receipt_id: u64,
+    #[topic]
+    pub lender: Address,
+    pub kg: u64,
+    pub old_due_date: u64,
+    pub new_due_date: u64,
+    pub extended_at: u64,
+}
+
+#[contractevent]
+pub struct RecoveryStarted {
+    #[topic]
+    pub receipt_id: u64,
+    #[topic]
+    pub lender: Address,
+    pub owner: Address,
+    pub kg: u64,
+    pub due_date: u64,
+    pub grace_period: u64,
+    pub started_at: u64,
+}
+
+#[contractevent]
+pub struct RecoveryCompleted {
+    #[topic]
+    pub receipt_id: u64,
+    #[topic]
+    pub lender: Address,
+    pub operator: Address,
+    pub previous_owner: Address,
+    pub buyer: Address,
+    pub kg: u64,
+    pub sale_ref: String,
+    pub settlement_ref: String,
+    pub started_at: u64,
+    pub completed_at: u64,
 }
 
 #[contractevent]
@@ -178,6 +251,10 @@ pub fn revoked(env: &Env, receipt_id: u64, reason: &String) {
 pub fn ttl_extended(env: &Env, receipt_id: u64) {
     TtlExtended { receipt_id }.publish(env);
 }
+
+// Lending events are built by the caller (`lending.rs`) and published
+// directly: their payloads are wide enough that a positional helper would be
+// easier to misorder than the named struct literal.
 
 pub fn warehouse_added(env: &Env, warehouse_id: &Symbol) {
     WarehouseAdded {

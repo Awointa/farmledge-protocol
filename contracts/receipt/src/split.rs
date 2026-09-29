@@ -1,7 +1,7 @@
 //! The one place a receipt is ever divided.
 //!
 //! Splitting is **internal to an operation**, never a callable entry point.
-//! `exit()` uses it today; `lock()` and `transfer()` reuse it next session.
+//! `exit`, `lock` and `unlock` all divide receipts through this one helper.
 //!
 //! The model is a paper receipt being voided and reissued as two: the parent
 //! moves to [`Status::Split`] and is never mutated again, and exactly two
@@ -14,19 +14,16 @@ use soroban_sdk::Env;
 use crate::errors::Error;
 use crate::events;
 use crate::storage;
-use crate::types::{Receipt, Status};
+use crate::types::{MaybeLock, Receipt, Status};
 
 /// Both children of a split.
 pub struct SplitParts {
     /// The `kg` the operation asked for. The caller mutates this one —
-    /// `exit` retires it, `lock` will pledge it.
+    /// `exit` retires it, `lock` pledges it, `unlock` releases it.
     pub taken: Receipt,
-    /// What is left. Keeps the parent's status, so after a partial exit the
-    /// remainder is still `Active`.
-    ///
-    /// `exit` has no use for it beyond having it persisted; `unlock` and
-    /// `transfer` will read it next session.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// What is left. Keeps the parent's status, lock and recovery, so after a
+    /// partial exit or lock the remainder is still `Active`, and after a
+    /// partial unlock it is still `Locked` or in `Recovery`.
     pub remainder: Receipt,
 }
 
@@ -35,8 +32,8 @@ pub struct SplitParts {
 /// Writes all three receipts and indexes both children. Returns them for the
 /// caller to finish mutating and re-persist.
 ///
-/// The caller is responsible for checking `parent.status` — `exit` and (next
-/// session) `lock` accept different sets. This function only enforces that
+/// The caller is responsible for checking `parent.status` — `exit`, `lock`
+/// and `unlock` accept different sets. This function only enforces that
 /// the quantity actually describes a split: `0 < kg < parent.weight_kg`. An
 /// exact-weight "split" is [`Error::InvalidSplitAmount`], because the caller
 /// should have taken its whole-receipt path instead.
@@ -69,6 +66,11 @@ pub fn split_receipt(env: &Env, parent: &Receipt, kg: u64) -> Result<SplitParts,
     for child in [&taken, &remainder] {
         storage::index_owner(env, &child.owner, child.receipt_id);
         storage::index_warehouse(env, &child.warehouse_id, child.receipt_id);
+        // Children of a pledged receipt stay pledged, so the lender's index
+        // must follow them.
+        if let MaybeLock::Some(lock) = &child.lock {
+            storage::index_lender(env, &lock.lender, child.receipt_id);
+        }
     }
 
     events::split(
@@ -105,6 +107,7 @@ fn child_of(env: &Env, parent: &Receipt, weight_kg: u64, bag_count: u32) -> Rece
         status: parent.status.clone(),
         lock: parent.lock.clone(),
         recovery: parent.recovery.clone(),
+        recovery_history: parent.recovery_history.clone(),
         deposit_date: parent.deposit_date,
         exit_date: None,
         exit_weight_kg: None,

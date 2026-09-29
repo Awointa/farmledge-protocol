@@ -1,10 +1,10 @@
 //! The invariant everything later depends on: **splitting never creates or
 //! destroys grain.**
 //!
-//! `lock` and `transfer` will reuse `split::split_receipt` next session, so
-//! this property is the contract's safety net rather than a test of `exit`
-//! specifically. It drives the helper through `exit`, which is the only
-//! caller that exists today.
+//! `exit`, `lock` and `unlock` all divide receipts through
+//! `split::split_receipt`, so this property is the contract's safety net
+//! rather than a test of `exit` specifically. It drives the helper through
+//! `exit`; `prop_lending.rs` drives it through every caller.
 
 use proptest::prelude::*;
 use soroban_sdk::Env;
@@ -14,7 +14,7 @@ use crate::Status;
 
 /// For every receipt that was split, check its two children account for it
 /// exactly — in weight and in bags.
-fn assert_each_parent_is_covered_by_its_children(
+pub fn assert_each_parent_is_covered_by_its_children(
     f: &Fixture,
     highest_id: u64,
 ) -> Result<(), TestCaseError> {

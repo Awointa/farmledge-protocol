@@ -1,11 +1,11 @@
-use soroban_sdk::{contracttype, Address, String, Symbol};
+use soroban_sdk::{contracttype, Address, String, Symbol, Vec};
 
 /// How a receipt's weight was determined.
 ///
 /// Phase 1 field testing is bag-count intake (`BagEstimate`); only `Scale`
-/// receipts will be eligible for collateral locks, because bag-derived
-/// weights vary with moisture and how full each bag is. That rule is not
-/// enforced yet — `lock()` lands next session.
+/// receipts are eligible for collateral locks, because bag-derived weights
+/// vary with moisture and how full each bag is. The rule lives in one place:
+/// `lending::require_scale_weight`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WeightSource {
@@ -13,19 +13,30 @@ pub enum WeightSource {
     Scale,
 }
 
-/// Receipt lifecycle.
+/// Receipt lifecycle. The only legal transitions:
 ///
-/// Reachable in this session: `Active`, `Split`, `Exited`, `Revoked`.
-/// `Locked` and `Recovery` are defined so the lending states need no
-/// migration when `lock()` / `start_recovery()` arrive.
+/// ```text
+/// Active   -> Locked     lock
+/// Active   -> Exited     exit
+/// Active   -> Revoked    revoke (admin)
+/// Locked   -> Active     unlock (full or partial)
+/// Locked   -> Locked     extend_due
+/// Locked   -> Recovery   start_recovery
+/// Recovery -> Active     unlock (farmer repaid before the sale completed)
+/// Recovery -> Active     complete_recovery (owner becomes the buyer)
+/// any live -> Split      internal, as part of a partial exit/lock/unlock
+/// ```
+///
+/// A `Locked` or `Recovery` receipt can never be exited, revoked, or split by
+/// its owner. To void a pledged receipt the lender unlocks it first.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Status {
-    /// Grain is in the warehouse and the receipt is transferable.
+    /// Grain is in the warehouse, free of any pledge.
     Active,
-    /// Pledged as loan collateral. Not reachable this session.
+    /// Pledged as loan collateral. `lock` is `MaybeLock::Some`.
     Locked,
-    /// Lender has begun default recovery. Not reachable this session.
+    /// Lender has begun default recovery. `lock` and `recovery` are both set.
     Recovery,
     /// Superseded by a split: this receipt was divided into exactly two
     /// children whose weights sum to it. Retained as an immutable audit
@@ -41,7 +52,8 @@ pub enum Status {
 /// stored on-chain — lenders keep loan terms in their own systems and
 /// reference them through `loan_ref`.
 ///
-/// Defined but never written this session.
+/// `due_date` and `grace_period` are ledger-timestamp seconds supplied by the
+/// lender. The contract enforces their ordering, not their length.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Lock {
@@ -51,14 +63,34 @@ pub struct Lock {
     pub grace_period: u64,
 }
 
-/// Default recovery via sale through bank escrow. `buyer` / `sale_ref` /
-/// `settlement_ref` are only populated on completion.
+/// How a recovery ended.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecoveryResolution {
+    /// In progress: the receipt is in `Status::Recovery`.
+    Open,
+    /// The lender unlocked before the sale completed.
+    Repaid,
+    /// Sold through escrow; ownership passed to `buyer`.
+    Completed,
+}
+
+/// One default recovery.
 ///
-/// Defined but never written this session.
+/// While open it sits in `Receipt::recovery`. When it resolves — `Repaid` by
+/// an unlock, `Completed` by a sale — it is moved into
+/// `Receipt::recovery_history`, which is append-only, so no later lock or
+/// recovery can overwrite it. The sale fields are only set on `Completed`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Recovery {
-    pub start_date: u64,
+    pub lender: Address,
+    pub loan_ref: String,
+    /// Owner of the receipt when recovery began.
+    pub owner: Address,
+    pub started_at: u64,
+    pub resolution: RecoveryResolution,
+    pub resolved_at: Option<u64>,
     pub buyer: Option<Address>,
     pub sale_ref: Option<String>,
     pub settlement_ref: Option<String>,
@@ -128,10 +160,13 @@ pub struct Receipt {
     pub verifier: Address,
     pub owner: Address,
     pub status: Status,
-    /// Always `MaybeLock::None` this session.
+    /// Set while `Locked` or `Recovery`.
     pub lock: MaybeLock,
-    /// Always `MaybeRecovery::None` this session.
+    /// The open recovery; set only while `Recovery`.
     pub recovery: MaybeRecovery,
+    /// Every resolved recovery, oldest first. Append-only; split children
+    /// inherit their parent's.
+    pub recovery_history: Vec<Recovery>,
     pub deposit_date: u64,
     pub exit_date: Option<u64>,
     /// Actual weighed quantity at exit; may differ from `weight_kg`.

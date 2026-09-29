@@ -36,7 +36,6 @@ pub enum DataKey {
     /// Custodians are registered per warehouse, not globally.
     Custodian(Symbol, Address),
     Verifier(Address),
-    /// Stored now, consumed by `complete_recovery` next session.
     RecoveryOperator(Address),
 
     // --- receipts ---
@@ -49,6 +48,8 @@ pub enum DataKey {
     OwnerPages(Address),
     WarehouseIndex(Symbol, u32),
     WarehousePages(Symbol),
+    LenderIndex(Address, u32),
+    LenderPages(Address),
 }
 
 // --- TTL -------------------------------------------------------------------
@@ -164,6 +165,18 @@ pub fn index_warehouse(env: &Env, warehouse_id: &Symbol, receipt_id: u64) {
     );
 }
 
+/// Every receipt ever pledged to `lender`, including a locked split child.
+/// A receipt re-pledged to the same lender after a full unlock appears twice;
+/// readers filter on `status` and `lock`.
+pub fn index_lender(env: &Env, lender: &Address, receipt_id: u64) {
+    push_index(
+        env,
+        &DataKey::LenderPages(lender.clone()),
+        |page| DataKey::LenderIndex(lender.clone(), page),
+        receipt_id,
+    );
+}
+
 pub fn owner_page(env: &Env, owner: &Address, page: u32) -> Vec<u64> {
     env.storage()
         .persistent()
@@ -189,5 +202,19 @@ pub fn warehouse_pages(env: &Env, warehouse_id: &Symbol) -> u32 {
     env.storage()
         .persistent()
         .get(&DataKey::WarehousePages(warehouse_id.clone()))
+        .unwrap_or(0)
+}
+
+pub fn lender_page(env: &Env, lender: &Address, page: u32) -> Vec<u64> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::LenderIndex(lender.clone(), page))
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn lender_pages(env: &Env, lender: &Address) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::LenderPages(lender.clone()))
         .unwrap_or(0)
 }

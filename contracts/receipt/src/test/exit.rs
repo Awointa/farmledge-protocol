@@ -367,9 +367,8 @@ fn partial_exit_emits_split_then_exited() {
 
 // --- the split helper, driven directly ------------------------------------
 //
-// `exit` only ever consumes `SplitParts::taken`. `lock` and `transfer` will
-// need the remainder too, so the helper is exercised on its own rather than
-// only through the one caller that exists today.
+// Each caller consumes a different part of `SplitParts`, so the helper is
+// also exercised on its own rather than only through its callers.
 
 #[test]
 fn the_split_helper_returns_both_children_and_retires_the_parent() {

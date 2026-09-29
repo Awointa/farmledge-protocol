@@ -5,9 +5,8 @@ use soroban_sdk::contracterror;
 /// match on. Fallible entry points return `Result<_, Error>`; the few places
 /// that must abort use `panic_with_error!`.
 ///
-/// **Error codes are public ABI. Never renumber them.** Codes 30-33 are
-/// reserved now, unused, so that the lending functions landing next session
-/// do not force a renumbering of everything below them.
+/// **Error codes are public ABI. Never renumber them.** New variants take
+/// the next free code.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -38,9 +37,20 @@ pub enum Error {
     AlreadyRegistered = 24,
     NotRegistered = 25,
 
-    // --- reserved for lock / unlock / extend_due / recovery (next session) ---
+    // --- lending ---
+    /// Only `WeightSource::Scale` receipts can be pledged.
     OnlyScaleEligibleForLock = 30,
+    /// `extend_due` must move the due date strictly later.
     DueDateNotLater = 31,
+    /// `start_recovery` before `due_date + grace_period` has passed.
     RecoveryNotYetDue = 32,
+    /// Reserved, unused: a settled receipt may be pledged again by its buyer,
+    /// and the sale record survives in `recovery_history`.
     RecoveryAlreadySettled = 33,
+    /// `get_lock` on a receipt that is not `Locked` or `Recovery`.
+    NotLocked = 34,
+    /// `due_date` not in the future, or `due_date + grace_period` overflows.
+    InvalidDueDate = 35,
+    /// A receipt cannot be pledged to its own owner.
+    LenderIsOwner = 36,
 }

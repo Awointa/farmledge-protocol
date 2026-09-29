@@ -4,11 +4,11 @@
 //! One contract for all commodities — commodity is a field on the receipt,
 //! not a separate deployment.
 //!
-//! This build covers the deposit-to-exit lifecycle: `mint`, `exit` (full and
-//! partial), `revoke` and `extend_ttl`. The lending states (`Locked`,
-//! `Recovery`) and their `Lock` / `Recovery` payloads are defined and stored
-//! on every receipt so that `lock`, `unlock`, `extend_due`, `start_recovery`,
-//! `complete_recovery` and `transfer` can be added without a migration.
+//! Covers the deposit-to-exit lifecycle (`mint`, `exit`, `revoke`,
+//! `extend_ttl`) and the lending lifecycle (`lock`, `unlock`, `extend_due`,
+//! `start_recovery`, `complete_recovery`). The legal status transitions are
+//! listed on [`Status`]. There is deliberately no user-to-user transfer, and
+//! no fees, pricing or settlement on-chain.
 //!
 //! Soroban has no implicit caller identity. Every address whose signature an
 //! operation needs is an explicit parameter that gets `require_auth()`d;
@@ -19,6 +19,7 @@
 mod admin;
 mod errors;
 mod events;
+mod lending;
 mod split;
 mod storage;
 mod types;
@@ -31,7 +32,9 @@ mod test;
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 
 pub use errors::Error;
-pub use types::{Lock, MaybeLock, MaybeRecovery, Receipt, Recovery, Status, WeightSource};
+pub use types::{
+    Lock, MaybeLock, MaybeRecovery, Receipt, Recovery, RecoveryResolution, Status, WeightSource,
+};
 
 /// Upper bound on `moisture_pct`, in basis points of a percent (100.00%).
 const MAX_MOISTURE_BPS: u32 = 10_000;
@@ -128,6 +131,7 @@ impl ReceiptContract {
             status: Status::Active,
             lock: MaybeLock::None,
             recovery: MaybeRecovery::None,
+            recovery_history: Vec::new(&env),
             deposit_date: env.ledger().timestamp(),
             exit_date: None,
             exit_weight_kg: None,
@@ -215,6 +219,9 @@ impl ReceiptContract {
 
     /// Voids a receipt. Admin only, and only from `Active` — a receipt whose
     /// grain has already left, or that is already void, is not revocable.
+    /// Neither is a pledged one: to void a `Locked` or `Recovery` receipt the
+    /// lender unlocks it first, so a lender never has collateral disappear
+    /// from under a live loan without having signed for it.
     ///
     /// Intended for proven fraudulent mints. `reason` is recorded in the
     /// event, not in storage.
@@ -250,7 +257,108 @@ impl ReceiptContract {
         Ok(())
     }
 
+    // --- lending -----------------------------------------------------------
+
+    /// Pledges `kg` of an `Active`, scale-weighed receipt to `lender`.
+    /// Requires **both** the lender's and the owner's authorisation, and
+    /// `lender != owner`.
+    ///
+    /// If `kg` is less than the receipt's weight the receipt is split first:
+    /// only that portion is locked and the remainder stays `Active` under the
+    /// owner. `due_date` (ledger timestamp) must be in the future;
+    /// `grace_period` is seconds after it before recovery may start.
+    ///
+    /// Returns the id of the locked receipt — the receipt itself on a full
+    /// lock, or the locked child on a partial one.
+    pub fn lock(
+        env: Env,
+        receipt_id: u64,
+        lender: Address,
+        kg: u64,
+        loan_ref: String,
+        due_date: u64,
+        grace_period: u64,
+    ) -> Result<u64, Error> {
+        lending::lock(
+            &env,
+            receipt_id,
+            lender,
+            kg,
+            loan_ref,
+            due_date,
+            grace_period,
+        )
+    }
+
+    /// Releases `kg` from a `Locked` or `Recovery` receipt back to its owner.
+    /// Only the lender recorded in the lock may sign.
+    ///
+    /// A partial unlock splits: the released portion is `Active`, the rest
+    /// stays `Locked` / in `Recovery` under the same lock. Unlocking from
+    /// `Recovery` records the recovery as `Repaid` in `recovery_history`.
+    ///
+    /// Returns the id of the released receipt.
+    pub fn unlock(env: Env, receipt_id: u64, kg: u64) -> Result<u64, Error> {
+        lending::unlock(&env, receipt_id, kg)
+    }
+
+    /// Moves a `Locked` receipt's due date strictly later. Lender only.
+    pub fn extend_due(env: Env, receipt_id: u64, new_due_date: u64) -> Result<(), Error> {
+        lending::extend_due(&env, receipt_id, new_due_date)
+    }
+
+    /// `Locked -> Recovery`, once the ledger time is strictly past
+    /// `due_date + grace_period`. Lender only.
+    pub fn start_recovery(env: Env, receipt_id: u64) -> Result<(), Error> {
+        lending::start_recovery(&env, receipt_id)
+    }
+
+    /// Records the escrow sale of a receipt in `Recovery`. Requires **both** a
+    /// registered recovery operator and the recorded lender.
+    ///
+    /// Ownership passes to `buyer`, the lock is cleared and the receipt is
+    /// `Active` again — the buyer then exits it (or pledges it) like any
+    /// other. The sale is appended to `recovery_history`, which later locks
+    /// cannot overwrite. The buyer does not sign: like the farmer at mint,
+    /// they are the beneficiary.
+    pub fn complete_recovery(
+        env: Env,
+        receipt_id: u64,
+        operator: Address,
+        buyer: Address,
+        sale_ref: String,
+        settlement_ref: String,
+    ) -> Result<(), Error> {
+        lending::complete_recovery(&env, receipt_id, operator, buyer, sale_ref, settlement_ref)
+    }
+
     // --- reads -------------------------------------------------------------
+
+    /// The live pledge on a `Locked` or `Recovery` receipt; `NotLocked`
+    /// otherwise.
+    pub fn get_lock(env: Env, receipt_id: u64) -> Result<Lock, Error> {
+        let receipt = storage::get_receipt(&env, receipt_id).ok_or(Error::ReceiptNotFound)?;
+        lending::current_lock(&receipt)
+    }
+
+    /// Whether `lock` would accept this receipt on status and weight source.
+    pub fn is_pledgeable(env: Env, receipt_id: u64) -> Result<bool, Error> {
+        let receipt = storage::get_receipt(&env, receipt_id).ok_or(Error::ReceiptNotFound)?;
+        Ok(lending::is_pledgeable(&receipt))
+    }
+
+    /// One page of receipts ever pledged to `lender`, 64 per page. Includes
+    /// released, recovered and split records; filter on `status` and `lock`
+    /// for live collateral.
+    pub fn get_receipts_by_lender(env: Env, lender: Address, page: u32) -> Vec<Receipt> {
+        let ids = storage::lender_page(&env, &lender, page);
+        Self::collect(&env, ids)
+    }
+
+    /// Number of pages `get_receipts_by_lender` will serve.
+    pub fn lender_page_count(env: Env, lender: Address) -> u32 {
+        storage::lender_pages(&env, &lender)
+    }
 
     pub fn get_receipt(env: Env, receipt_id: u64) -> Result<Receipt, Error> {
         storage::get_receipt(&env, receipt_id).ok_or(Error::ReceiptNotFound)
@@ -261,7 +369,9 @@ impl ReceiptContract {
     /// Paged because an unpaged read would blow the network's per-transaction
     /// ledger-read limit (200 entries) once a farmer has a few hundred
     /// receipts. Includes `Split`, `Exited` and `Revoked` records — they are
-    /// the audit trail; filter on `status` for live holdings.
+    /// the audit trail; filter on `status` for live holdings. A receipt sold
+    /// in recovery stays listed under its previous owner too, so also filter
+    /// on `owner`.
     pub fn get_receipts_by_owner(env: Env, owner: Address, page: u32) -> Vec<Receipt> {
         let ids = storage::owner_page(&env, &owner, page);
         Self::collect(&env, ids)
@@ -313,7 +423,7 @@ impl ReceiptContract {
         admin::remove_verifier(&env, verifier)
     }
 
-    /// Stored now, consumed by `complete_recovery` next session.
+    /// Recovery operators co-sign `complete_recovery`.
     pub fn add_recovery_operator(env: Env, operator: Address) -> Result<(), Error> {
         admin::add_recovery_operator(&env, operator)
     }
