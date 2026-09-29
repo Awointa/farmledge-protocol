@@ -1,66 +1,52 @@
-use soroban_sdk::{contractevent, Address, Env, String, Symbol};
+//! One typed event per state change, using `#[contractevent]` (the SDK
+//! deprecated raw `env.events().publish()` in favour of it).
+//!
+//! Field order matters: `#[topic]` fields become topics after the event name,
+//! the rest form the data payload. Indexers filter on topics, so receipt ids
+//! and registry subjects are topics.
+//!
+//! Events are how `farmledge-app` mirrors chain state, but they are
+//! **ephemeral** — RPC providers retain roughly 7 days. Anything needed
+//! long-term has to be derivable from receipts in storage, and it is: every
+//! event here is a projection of a `Receipt` that remains readable.
+//!
+//! The lending events (`locked`, `unlocked`, `due_extended`,
+//! `recovery_started`, `recovery_completed`) land with their functions next
+//! session. Adding an event is free — it is not stored state.
 
-/// Typed events, one per state change (design doc §4.1), using the current
-/// `#[contractevent]` macro — the SDK deprecated raw `env.events().publish()`
-/// in favor of this in soroban-sdk 26+. Only `Minted` is actually emitted in
-/// this Phase 1 skeleton; the rest are ready for their TODO function bodies.
+use soroban_sdk::{contractevent, Address, Env, String, Symbol};
 
 #[contractevent]
 pub struct Minted {
     #[topic]
     pub receipt_id: u64,
+    #[topic]
+    pub warehouse_id: Symbol,
     pub deposit_id: String,
     pub owner: Address,
+    pub weight_kg: u64,
 }
 
-#[contractevent]
-pub struct Locked {
-    #[topic]
-    pub receipt_id: u64,
-    pub lender: Address,
-    pub kg: u64,
-}
-
-#[contractevent]
-pub struct Unlocked {
-    #[topic]
-    pub receipt_id: u64,
-    pub kg: u64,
-}
-
+/// Emitted once per split, carrying both children. The two child weights
+/// always sum to the parent's.
 #[contractevent]
 pub struct Split {
     #[topic]
     pub parent_id: u64,
-    pub child_id: u64,
-    pub child_weight_kg: u64,
-}
-
-#[contractevent]
-pub struct DueExtended {
-    #[topic]
-    pub receipt_id: u64,
-    pub new_due: u64,
-}
-
-#[contractevent]
-pub struct RecoveryStarted {
-    #[topic]
-    pub receipt_id: u64,
-    pub start_date: u64,
-}
-
-#[contractevent]
-pub struct RecoveryCompleted {
-    #[topic]
-    pub receipt_id: u64,
-    pub buyer: Address,
+    pub taken_id: u64,
+    pub taken_weight_kg: u64,
+    pub remainder_id: u64,
+    pub remainder_weight_kg: u64,
 }
 
 #[contractevent]
 pub struct Exited {
     #[topic]
     pub receipt_id: u64,
+    pub custodian: Address,
+    /// Book weight the receipt was denominated in.
+    pub weight_kg: u64,
+    /// What it actually weighed leaving the warehouse.
     pub exit_weight_kg: u64,
 }
 
@@ -75,6 +61,18 @@ pub struct Revoked {
 pub struct TtlExtended {
     #[topic]
     pub receipt_id: u64,
+}
+
+#[contractevent]
+pub struct WarehouseAdded {
+    #[topic]
+    pub warehouse_id: Symbol,
+}
+
+#[contractevent]
+pub struct WarehouseRemoved {
+    #[topic]
+    pub warehouse_id: Symbol,
 }
 
 #[contractevent]
@@ -115,64 +113,55 @@ pub struct RecoveryOperatorRemoved {
     pub operator: Address,
 }
 
-pub fn minted(env: &Env, receipt_id: u64, deposit_id: &String, owner: &Address) {
+// --- emit helpers ----------------------------------------------------------
+
+pub fn minted(
+    env: &Env,
+    receipt_id: u64,
+    warehouse_id: &Symbol,
+    deposit_id: &String,
+    owner: &Address,
+    weight_kg: u64,
+) {
     Minted {
         receipt_id,
+        warehouse_id: warehouse_id.clone(),
         deposit_id: deposit_id.clone(),
         owner: owner.clone(),
+        weight_kg,
     }
     .publish(env);
 }
 
-pub fn locked(env: &Env, receipt_id: u64, lender: &Address, kg: u64) {
-    Locked {
-        receipt_id,
-        lender: lender.clone(),
-        kg,
-    }
-    .publish(env);
-}
-
-pub fn unlocked(env: &Env, receipt_id: u64, kg: u64) {
-    Unlocked { receipt_id, kg }.publish(env);
-}
-
-pub fn split(env: &Env, parent_id: u64, child_id: u64, child_weight_kg: u64) {
+pub fn split(
+    env: &Env,
+    parent_id: u64,
+    taken_id: u64,
+    taken_weight_kg: u64,
+    remainder_id: u64,
+    remainder_weight_kg: u64,
+) {
     Split {
         parent_id,
-        child_id,
-        child_weight_kg,
+        taken_id,
+        taken_weight_kg,
+        remainder_id,
+        remainder_weight_kg,
     }
     .publish(env);
 }
 
-pub fn due_extended(env: &Env, receipt_id: u64, new_due: u64) {
-    DueExtended {
-        receipt_id,
-        new_due,
-    }
-    .publish(env);
-}
-
-pub fn recovery_started(env: &Env, receipt_id: u64, start_date: u64) {
-    RecoveryStarted {
-        receipt_id,
-        start_date,
-    }
-    .publish(env);
-}
-
-pub fn recovery_completed(env: &Env, receipt_id: u64, buyer: &Address) {
-    RecoveryCompleted {
-        receipt_id,
-        buyer: buyer.clone(),
-    }
-    .publish(env);
-}
-
-pub fn exited(env: &Env, receipt_id: u64, exit_weight_kg: u64) {
+pub fn exited(
+    env: &Env,
+    receipt_id: u64,
+    custodian: &Address,
+    weight_kg: u64,
+    exit_weight_kg: u64,
+) {
     Exited {
         receipt_id,
+        custodian: custodian.clone(),
+        weight_kg,
         exit_weight_kg,
     }
     .publish(env);
@@ -190,17 +179,31 @@ pub fn ttl_extended(env: &Env, receipt_id: u64) {
     TtlExtended { receipt_id }.publish(env);
 }
 
-pub fn custodian_added(env: &Env, warehouse_id: Symbol, custodian: &Address) {
+pub fn warehouse_added(env: &Env, warehouse_id: &Symbol) {
+    WarehouseAdded {
+        warehouse_id: warehouse_id.clone(),
+    }
+    .publish(env);
+}
+
+pub fn warehouse_removed(env: &Env, warehouse_id: &Symbol) {
+    WarehouseRemoved {
+        warehouse_id: warehouse_id.clone(),
+    }
+    .publish(env);
+}
+
+pub fn custodian_added(env: &Env, warehouse_id: &Symbol, custodian: &Address) {
     CustodianAdded {
-        warehouse_id,
+        warehouse_id: warehouse_id.clone(),
         custodian: custodian.clone(),
     }
     .publish(env);
 }
 
-pub fn custodian_removed(env: &Env, warehouse_id: Symbol, custodian: &Address) {
+pub fn custodian_removed(env: &Env, warehouse_id: &Symbol, custodian: &Address) {
     CustodianRemoved {
-        warehouse_id,
+        warehouse_id: warehouse_id.clone(),
         custodian: custodian.clone(),
     }
     .publish(env);
