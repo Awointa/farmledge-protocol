@@ -137,7 +137,6 @@ proptest! {
                             &l.operator,
                             &buyer,
                             &String::from_str(&env, "SALE-P"),
-                            &String::from_str(&env, "SETTLE-P"),
                         )
                         .is_err()
                 }

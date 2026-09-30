@@ -44,8 +44,7 @@ pub enum Error {
     DueDateNotLater = 31,
     /// `start_recovery` before `due_date + grace_period` has passed.
     RecoveryNotYetDue = 32,
-    /// Reserved, unused: a settled receipt may be pledged again by its buyer,
-    /// and the sale record survives in `recovery_history`.
+    /// `record_settlement` on a sale whose settlement is already recorded.
     RecoveryAlreadySettled = 33,
     /// `get_lock` on a receipt that is not `Locked` or `Recovery`.
     NotLocked = 34,
@@ -53,4 +52,6 @@ pub enum Error {
     InvalidDueDate = 35,
     /// A receipt cannot be pledged to its own owner.
     LenderIsOwner = 36,
+    /// No sale with this `sale_id` — the recovery was never completed.
+    SaleNotFound = 37,
 }

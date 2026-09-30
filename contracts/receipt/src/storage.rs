@@ -1,6 +1,6 @@
 use soroban_sdk::{contracttype, Address, Env, String, Symbol, Vec};
 
-use crate::types::Receipt;
+use crate::types::{Receipt, Sale};
 
 /// ~5s per ledger.
 pub const DAY_IN_LEDGERS: u32 = 17_280;
@@ -30,6 +30,7 @@ pub enum DataKey {
     // --- instance ---
     Admin,
     NextReceiptId,
+    NextSaleId,
 
     // --- registries (persistent; value is always `()`, presence is the fact) ---
     Warehouse(Symbol),
@@ -50,6 +51,11 @@ pub enum DataKey {
     WarehousePages(Symbol),
     LenderIndex(Address, u32),
     LenderPages(Address),
+
+    // --- recovery sales ---
+    Sale(u64),
+    /// `sale_id`s awaiting `record_settlement`, oldest first.
+    UnsettledSales,
 }
 
 // --- TTL -------------------------------------------------------------------
@@ -109,6 +115,62 @@ pub fn next_receipt_id(env: &Env) -> u64 {
     let next: u64 = env.storage().instance().get(&key).unwrap_or(0) + 1;
     env.storage().instance().set(&key, &next);
     next
+}
+
+// --- recovery sales --------------------------------------------------------
+
+/// Ids start at 1, like receipt ids.
+pub fn next_sale_id(env: &Env) -> u64 {
+    let key = DataKey::NextSaleId;
+    let next: u64 = env.storage().instance().get(&key).unwrap_or(0) + 1;
+    env.storage().instance().set(&key, &next);
+    next
+}
+
+pub fn get_sale(env: &Env, sale_id: u64) -> Option<Sale> {
+    env.storage().persistent().get(&DataKey::Sale(sale_id))
+}
+
+pub fn set_sale(env: &Env, sale: &Sale) {
+    let key = DataKey::Sale(sale.sale_id);
+    env.storage().persistent().set(&key, sale);
+    bump(env, &key);
+}
+
+pub fn bump_sale(env: &Env, sale_id: u64) {
+    let key = DataKey::Sale(sale_id);
+    if env.storage().persistent().has(&key) {
+        bump(env, &key);
+    }
+}
+
+/// Unsettled sales are few and short-lived — each is removed as soon as the
+/// bank settles — so one list entry is enough; it is not an audit index.
+pub fn unsettled_sales(env: &Env) -> Vec<u64> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::UnsettledSales)
+        .unwrap_or(Vec::new(env))
+}
+
+fn set_unsettled_sales(env: &Env, ids: &Vec<u64>) {
+    let key = DataKey::UnsettledSales;
+    env.storage().persistent().set(&key, ids);
+    bump(env, &key);
+}
+
+pub fn push_unsettled_sale(env: &Env, sale_id: u64) {
+    let mut ids = unsettled_sales(env);
+    ids.push_back(sale_id);
+    set_unsettled_sales(env, &ids);
+}
+
+pub fn remove_unsettled_sale(env: &Env, sale_id: u64) {
+    let mut ids = unsettled_sales(env);
+    if let Some(i) = ids.first_index_of(sale_id) {
+        ids.remove(i);
+        set_unsettled_sales(env, &ids);
+    }
 }
 
 // --- paged secondary indexes -----------------------------------------------

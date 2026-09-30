@@ -131,7 +131,11 @@ fn revoke_emits_a_revoked_event() {
 
     let expected = crate::events::Revoked {
         receipt_id: id,
+        warehouse_id: f.warehouse.clone(),
+        owner: f.farmer.clone(),
+        weight_kg: 2_000,
         reason,
+        revoked_at: 0,
     };
     assert_eq!(
         env.events().all(),

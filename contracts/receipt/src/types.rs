@@ -80,7 +80,12 @@ pub enum RecoveryResolution {
 /// While open it sits in `Receipt::recovery`. When it resolves — `Repaid` by
 /// an unlock, `Completed` by a sale — it is moved into
 /// `Receipt::recovery_history`, which is append-only, so no later lock or
-/// recovery can overwrite it. The sale fields are only set on `Completed`.
+/// recovery can overwrite it.
+///
+/// A completed recovery points at its canonical [`Sale`] by `sale_id` rather
+/// than carrying the settlement itself: the buyer may split the receipt
+/// before the bank settles, and every child's copy of this record must
+/// resolve to the same, later-completed settlement.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Recovery {
@@ -91,9 +96,39 @@ pub struct Recovery {
     pub started_at: u64,
     pub resolution: RecoveryResolution,
     pub resolved_at: Option<u64>,
+    /// Set only on `Completed`.
+    pub sale_id: Option<u64>,
+    /// Set only on `Completed`.
     pub buyer: Option<Address>,
+    /// Escrow deposit reference proving the buyer paid. Set only on
+    /// `Completed`.
     pub sale_ref: Option<String>,
+}
+
+/// The canonical record of one recovery sale, stored once under its
+/// `sale_id` no matter how the sold receipt is later divided.
+///
+/// Everything except the settlement is fixed at `complete_recovery`.
+/// `settlement_ref` — the bank's payout to the lender and any surplus to the
+/// farmer — arrives later through `record_settlement` and is write-once.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Sale {
+    pub sale_id: u64,
+    /// The receipt that was sold, as it was at the moment of sale.
+    pub receipt_id: u64,
+    pub warehouse_id: Symbol,
+    pub weight_kg: u64,
+    pub lender: Address,
+    pub loan_ref: String,
+    pub operator: Address,
+    pub previous_owner: Address,
+    pub buyer: Address,
+    pub sale_ref: String,
+    pub started_at: u64,
+    pub completed_at: u64,
     pub settlement_ref: Option<String>,
+    pub settled_at: Option<u64>,
 }
 
 /// Stands in for `Option<Lock>`.

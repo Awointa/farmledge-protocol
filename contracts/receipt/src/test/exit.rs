@@ -344,16 +344,25 @@ fn partial_exit_emits_split_then_exited() {
 
     let split = crate::events::Split {
         parent_id,
+        owner: f.farmer.clone(),
+        warehouse_id: f.warehouse.clone(),
+        status: Status::Active,
         taken_id: exited_id,
         taken_weight_kg: 500,
+        taken_bag_count: 5,
         remainder_id: exited_id + 1,
         remainder_weight_kg: 1_500,
+        remainder_bag_count: 15,
     };
     let exited = crate::events::Exited {
         receipt_id: exited_id,
+        warehouse_id: f.warehouse.clone(),
+        owner: f.farmer.clone(),
         custodian: f.custodian.clone(),
         weight_kg: 500,
+        bag_count: 5,
         exit_weight_kg: 498,
+        exit_date: 0,
     };
 
     assert_eq!(

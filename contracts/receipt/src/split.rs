@@ -73,14 +73,19 @@ pub fn split_receipt(env: &Env, parent: &Receipt, kg: u64) -> Result<SplitParts,
         }
     }
 
-    events::split(
-        env,
-        parent.receipt_id,
-        taken.receipt_id,
-        taken_weight,
-        remainder.receipt_id,
-        remainder_weight,
-    );
+    events::Split {
+        parent_id: parent.receipt_id,
+        owner: parent.owner.clone(),
+        warehouse_id: parent.warehouse_id.clone(),
+        status: parent.status.clone(),
+        taken_id: taken.receipt_id,
+        taken_weight_kg: taken_weight,
+        taken_bag_count: taken_bags,
+        remainder_id: remainder.receipt_id,
+        remainder_weight_kg: remainder_weight,
+        remainder_bag_count: remainder_bags,
+    }
+    .publish(env);
 
     Ok(SplitParts { taken, remainder })
 }

@@ -8,6 +8,7 @@ mod prop_split;
 mod recovery;
 mod registry;
 mod revoke;
+mod settlement;
 mod ttl;
 mod unlock;
 
@@ -182,14 +183,14 @@ impl Lending<'_> {
         self.f.client.start_recovery(&receipt_id);
     }
 
-    pub fn complete(&self, env: &Env, receipt_id: u64, buyer: &Address) {
+    /// Completes the sale with `SALE-1`; returns the `sale_id`.
+    pub fn complete(&self, env: &Env, receipt_id: u64, buyer: &Address) -> u64 {
         self.f.client.complete_recovery(
             &receipt_id,
             &self.operator,
             buyer,
             &String::from_str(env, "SALE-1"),
-            &String::from_str(env, "SETTLE-1"),
-        );
+        )
     }
 }
 

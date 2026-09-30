@@ -203,15 +203,22 @@ fn unlocked_event_marks_a_partial_release() {
 
     let split = crate::events::Split {
         parent_id: id,
+        owner: l.f.farmer.clone(),
+        warehouse_id: l.f.warehouse.clone(),
+        status: Status::Locked,
         taken_id: released,
         taken_weight_kg: 700,
+        taken_bag_count: 7,
         remainder_id: released + 1,
         remainder_weight_kg: 1_300,
+        remainder_bag_count: 13,
     };
     let unlocked = crate::events::Unlocked {
         receipt_id: released,
         lender: l.lender.clone(),
         owner: l.f.farmer.clone(),
+        warehouse_id: l.f.warehouse.clone(),
+        loan_ref: String::from_str(&env, super::LOAN_REF),
         kg: 700,
         partial: true,
         remaining_receipt_id: Some(released + 1),
@@ -240,9 +247,13 @@ fn due_extended_event_carries_old_and_new_dates() {
     let expected = crate::events::DueExtended {
         receipt_id: id,
         lender: l.lender.clone(),
+        owner: l.f.farmer.clone(),
+        warehouse_id: l.f.warehouse.clone(),
+        loan_ref: String::from_str(&env, super::LOAN_REF),
         kg: 2_000,
         old_due_date: DUE,
         new_due_date: DUE + 86_400,
+        grace_period: GRACE,
         extended_at: NOW,
     };
     assert_eq!(

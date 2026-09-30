@@ -6,7 +6,7 @@
 //!
 //! Covers the deposit-to-exit lifecycle (`mint`, `exit`, `revoke`,
 //! `extend_ttl`) and the lending lifecycle (`lock`, `unlock`, `extend_due`,
-//! `start_recovery`, `complete_recovery`). The legal status transitions are
+//! `start_recovery`, `complete_recovery`, `record_settlement`). The legal status transitions are
 //! listed on [`Status`]. There is deliberately no user-to-user transfer, and
 //! no fees, pricing or settlement on-chain.
 //!
@@ -33,7 +33,8 @@ use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 
 pub use errors::Error;
 pub use types::{
-    Lock, MaybeLock, MaybeRecovery, Receipt, Recovery, RecoveryResolution, Status, WeightSource,
+    Lock, MaybeLock, MaybeRecovery, Receipt, Recovery, RecoveryResolution, Sale, Status,
+    WeightSource,
 };
 
 /// Upper bound on `moisture_pct`, in basis points of a percent (100.00%).
@@ -143,14 +144,22 @@ impl ReceiptContract {
         storage::index_warehouse(&env, &warehouse_id, receipt_id);
         storage::bump_instance(&env);
 
-        events::minted(
-            &env,
+        events::Minted {
             receipt_id,
-            &warehouse_id,
-            &deposit_id,
-            &farmer,
-            weight_kg,
-        );
+            warehouse_id: receipt.warehouse_id,
+            deposit_id: receipt.deposit_id,
+            owner: receipt.owner,
+            commodity: receipt.commodity,
+            grade: receipt.grade,
+            weight_kg: receipt.weight_kg,
+            weight_source: receipt.weight_source,
+            bag_count: receipt.bag_count,
+            moisture_pct: receipt.moisture_pct,
+            custodian: receipt.custodian,
+            verifier: receipt.verifier,
+            deposit_date: receipt.deposit_date,
+        }
+        .publish(&env);
         Ok(receipt_id)
     }
 
@@ -207,13 +216,17 @@ impl ReceiptContract {
         storage::set_receipt(&env, &exiting);
         storage::bump_instance(&env);
 
-        events::exited(
-            &env,
-            exiting.receipt_id,
-            &custodian,
-            exiting.weight_kg,
+        events::Exited {
+            receipt_id: exiting.receipt_id,
+            warehouse_id: exiting.warehouse_id,
+            owner: exiting.owner,
+            custodian,
+            weight_kg: exiting.weight_kg,
+            bag_count: exiting.bag_count,
             exit_weight_kg,
-        );
+            exit_date: env.ledger().timestamp(),
+        }
+        .publish(&env);
         Ok(exiting.receipt_id)
     }
 
@@ -237,7 +250,15 @@ impl ReceiptContract {
         storage::set_receipt(&env, &receipt);
         storage::bump_instance(&env);
 
-        events::revoked(&env, receipt_id, &reason);
+        events::Revoked {
+            receipt_id,
+            warehouse_id: receipt.warehouse_id,
+            owner: receipt.owner,
+            weight_kg: receipt.weight_kg,
+            reason,
+            revoked_at: env.ledger().timestamp(),
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -246,14 +267,22 @@ impl ReceiptContract {
     /// anyone else with an interest in the receipt surviving.
     ///
     /// Also bumps the receipt's `deposit_id` guard entry, keeping the
-    /// duplicate-mint protection alive alongside the receipt it protects.
+    /// duplicate-mint protection alive alongside the receipt it protects, and
+    /// any `Sale` records its recovery history refers to.
     pub fn extend_ttl(env: Env, receipt_id: u64) -> Result<(), Error> {
         let receipt = storage::get_receipt(&env, receipt_id).ok_or(Error::ReceiptNotFound)?;
 
         storage::bump_receipt(&env, receipt_id);
         storage::bump_deposit_index(&env, &receipt.deposit_id);
+        // Sale records live in their own entries; keep any this receipt's
+        // history points at alive alongside it.
+        for recovery in receipt.recovery_history.iter() {
+            if let Some(sale_id) = recovery.sale_id {
+                storage::bump_sale(&env, sale_id);
+            }
+        }
 
-        events::ttl_extended(&env, receipt_id);
+        events::TtlExtended { receipt_id }.publish(&env);
         Ok(())
     }
 
@@ -316,20 +345,35 @@ impl ReceiptContract {
     /// Records the escrow sale of a receipt in `Recovery`. Requires **both** a
     /// registered recovery operator and the recorded lender.
     ///
+    /// `sale_ref` is the escrow deposit reference proving the buyer paid.
     /// Ownership passes to `buyer`, the lock is cleared and the receipt is
     /// `Active` again — the buyer then exits it (or pledges it) like any
-    /// other. The sale is appended to `recovery_history`, which later locks
-    /// cannot overwrite. The buyer does not sign: like the farmer at mint,
-    /// they are the beneficiary.
+    /// other. The buyer does not sign: like the farmer at mint, they are the
+    /// beneficiary.
+    ///
+    /// Creates a canonical `Sale` record, appends a `Completed` recovery
+    /// pointing at it to `recovery_history`, and queues the sale for
+    /// `record_settlement`. Returns the `sale_id`.
     pub fn complete_recovery(
         env: Env,
         receipt_id: u64,
         operator: Address,
         buyer: Address,
         sale_ref: String,
+    ) -> Result<u64, Error> {
+        lending::complete_recovery(&env, receipt_id, operator, buyer, sale_ref)
+    }
+
+    /// Records the bank's settlement of a completed sale — the payout to the
+    /// lender and any surplus to the farmer. Requires **both** a registered
+    /// recovery operator and the sale's lender. Write-once.
+    pub fn record_settlement(
+        env: Env,
+        sale_id: u64,
+        operator: Address,
         settlement_ref: String,
     ) -> Result<(), Error> {
-        lending::complete_recovery(&env, receipt_id, operator, buyer, sale_ref, settlement_ref)
+        lending::record_settlement(&env, sale_id, operator, settlement_ref)
     }
 
     // --- reads -------------------------------------------------------------
@@ -358,6 +402,32 @@ impl ReceiptContract {
     /// Number of pages `get_receipts_by_lender` will serve.
     pub fn lender_page_count(env: Env, lender: Address) -> u32 {
         storage::lender_pages(&env, &lender)
+    }
+
+    pub fn get_sale(env: Env, sale_id: u64) -> Result<Sale, Error> {
+        storage::get_sale(&env, sale_id).ok_or(Error::SaleNotFound)
+    }
+
+    /// Completed recoveries still waiting for `record_settlement`, oldest
+    /// first, 64 per page.
+    pub fn get_unsettled_sales(env: Env, page: u32) -> Vec<Sale> {
+        let ids = storage::unsettled_sales(&env);
+        let start = page.saturating_mul(storage::INDEX_PAGE_SIZE);
+        let end = start
+            .saturating_add(storage::INDEX_PAGE_SIZE)
+            .min(ids.len());
+        let mut out = Vec::new(&env);
+        for i in start..end {
+            if let Some(sale) = storage::get_sale(&env, ids.get_unchecked(i)) {
+                out.push_back(sale);
+            }
+        }
+        out
+    }
+
+    /// Number of sales awaiting settlement.
+    pub fn unsettled_sale_count(env: Env) -> u32 {
+        storage::unsettled_sales(&env).len()
     }
 
     pub fn get_receipt(env: Env, receipt_id: u64) -> Result<Receipt, Error> {

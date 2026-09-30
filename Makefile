@@ -73,4 +73,4 @@ deploy-testnet: build
 	cat $(DEPLOYMENT)
 
 contract-id:
-	@cut -d= -f2 <(grep '^CONTRACT_ID=' $(DEPLOYMENT))
+	@grep '^CONTRACT_ID=' $(DEPLOYMENT) | cut -d= -f2

@@ -390,7 +390,15 @@ fn mint_emits_a_minted_event() {
         warehouse_id: f.warehouse.clone(),
         deposit_id: String::from_str(&env, "DEP-EVT"),
         owner: f.farmer.clone(),
+        commodity: soroban_sdk::Symbol::new(&env, super::COMMODITY),
+        grade: soroban_sdk::Symbol::new(&env, super::GRADE),
         weight_kg: 2_000,
+        weight_source: crate::WeightSource::Scale,
+        bag_count: 20,
+        moisture_pct: super::MOISTURE,
+        custodian: f.custodian.clone(),
+        verifier: f.verifier.clone(),
+        deposit_date: 0,
     };
     assert_eq!(
         env.events().all(),

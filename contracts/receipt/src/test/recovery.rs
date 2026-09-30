@@ -25,7 +25,6 @@ fn complete_args(
         l.operator.clone(),
         buyer.clone(),
         String::from_str(env, "SALE-1"),
-        String::from_str(env, "SETTLE-1"),
     )
         .into_val(env)
 }
@@ -36,15 +35,9 @@ fn try_complete(
     id: u64,
     operator: &Address,
     buyer: &Address,
-) -> Result<(), Result<Error, soroban_sdk::InvokeError>> {
+) -> Result<u64, Result<Error, soroban_sdk::InvokeError>> {
     l.f.client
-        .try_complete_recovery(
-            &id,
-            operator,
-            buyer,
-            &String::from_str(env, "SALE-1"),
-            &String::from_str(env, "SETTLE-1"),
-        )
+        .try_complete_recovery(&id, operator, buyer, &String::from_str(env, "SALE-1"))
         .map(|r| r.unwrap())
 }
 
@@ -112,9 +105,9 @@ fn start_recovery_before_due_plus_grace_fails_and_one_second_after_succeeds() {
             started_at: DEADLINE + 1,
             resolution: RecoveryResolution::Open,
             resolved_at: None,
+            sale_id: None,
             buyer: None,
             sale_ref: None,
-            settlement_ref: None,
         })
     );
     // The pledge is still readable while recovery runs.
@@ -217,7 +210,7 @@ fn complete_recovery_with_operator_and_lender_succeeds() {
         args,
         &[&l.operator, &l.lender],
     );
-    assert_eq!(try_complete(&env, &l, id, &l.operator, &buyer), Ok(()));
+    assert!(try_complete(&env, &l, id, &l.operator, &buyer).is_ok());
 }
 
 #[test]
@@ -285,7 +278,8 @@ fn complete_recovery_hands_the_receipt_to_the_buyer_and_records_the_sale() {
     l.default_and_recover(&env, id);
     env.ledger().set_timestamp(DEADLINE + 500);
     let buyer = Address::generate(&env);
-    l.complete(&env, id, &buyer);
+    let sale_id = l.complete(&env, id, &buyer);
+    assert_eq!(sale_id, 1, "sale ids start at 1");
 
     let r = l.f.client.get_receipt(&id);
     assert_eq!(r.status, Status::Active);
@@ -302,9 +296,28 @@ fn complete_recovery_hands_the_receipt_to_the_buyer_and_records_the_sale() {
             started_at: DEADLINE + 1,
             resolution: RecoveryResolution::Completed,
             resolved_at: Some(DEADLINE + 500),
+            sale_id: Some(sale_id),
             buyer: Some(buyer.clone()),
             sale_ref: Some(String::from_str(&env, "SALE-1")),
-            settlement_ref: Some(String::from_str(&env, "SETTLE-1")),
+        }
+    );
+    assert_eq!(
+        l.f.client.get_sale(&sale_id),
+        crate::Sale {
+            sale_id,
+            receipt_id: id,
+            warehouse_id: l.f.warehouse.clone(),
+            weight_kg: 2_000,
+            lender: l.lender.clone(),
+            loan_ref: String::from_str(&env, LOAN_REF),
+            operator: l.operator.clone(),
+            previous_owner: l.f.farmer.clone(),
+            buyer: buyer.clone(),
+            sale_ref: String::from_str(&env, "SALE-1"),
+            started_at: DEADLINE + 1,
+            completed_at: DEADLINE + 500,
+            settlement_ref: None,
+            settled_at: None,
         }
     );
     assert_eq!(l.f.client.try_get_lock(&id), Err(Ok(Error::NotLocked)));
@@ -513,7 +526,9 @@ fn recovery_started_and_completed_events_carry_the_indexer_fields() {
     let started = crate::events::RecoveryStarted {
         receipt_id: id,
         lender: l.lender.clone(),
+        warehouse_id: l.f.warehouse.clone(),
         owner: l.f.farmer.clone(),
+        loan_ref: String::from_str(&env, LOAN_REF),
         kg: 2_000,
         due_date: DUE,
         grace_period: GRACE,
@@ -526,16 +541,18 @@ fn recovery_started_and_completed_events_carry_the_indexer_fields() {
 
     env.ledger().set_timestamp(DEADLINE + 99);
     let buyer = Address::generate(&env);
-    l.complete(&env, id, &buyer);
+    let sale_id = l.complete(&env, id, &buyer);
     let completed = crate::events::RecoveryCompleted {
         receipt_id: id,
         lender: l.lender.clone(),
+        sale_id,
         operator: l.operator.clone(),
         previous_owner: l.f.farmer.clone(),
         buyer,
+        warehouse_id: l.f.warehouse.clone(),
+        loan_ref: String::from_str(&env, LOAN_REF),
         kg: 2_000,
         sale_ref: String::from_str(&env, "SALE-1"),
-        settlement_ref: String::from_str(&env, "SETTLE-1"),
         started_at: DEADLINE + 1,
         completed_at: DEADLINE + 99,
     };
@@ -559,6 +576,8 @@ fn unlock_from_recovery_is_flagged_in_the_event() {
         receipt_id: id,
         lender: l.lender.clone(),
         owner: l.f.farmer.clone(),
+        warehouse_id: l.f.warehouse.clone(),
+        loan_ref: String::from_str(&env, LOAN_REF),
         kg: 2_000,
         partial: false,
         remaining_receipt_id: None,

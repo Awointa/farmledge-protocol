@@ -1,5 +1,5 @@
 //! The lending lifecycle: `lock`, `unlock`, `extend_due`, `start_recovery`,
-//! `complete_recovery`.
+//! `complete_recovery`, `record_settlement`.
 //!
 //! Only `lock` takes the lender as a parameter, because the pledge does not
 //! exist yet. Every later operation authorises the lender **recorded in the
@@ -18,7 +18,8 @@ use crate::events;
 use crate::split;
 use crate::storage;
 use crate::types::{
-    Lock, MaybeLock, MaybeRecovery, Receipt, Recovery, RecoveryResolution, Status, WeightSource,
+    Lock, MaybeLock, MaybeRecovery, Receipt, Recovery, RecoveryResolution, Sale, Status,
+    WeightSource,
 };
 
 /// **The pledge-eligibility rule.** Only scale-weighed receipts can be
@@ -119,6 +120,7 @@ pub fn lock(
         receipt_id: locking.receipt_id,
         lender,
         owner: locking.owner.clone(),
+        warehouse_id: locking.warehouse_id.clone(),
         kg: locking.weight_kg,
         loan_ref,
         due_date,
@@ -164,6 +166,8 @@ pub fn unlock(env: &Env, receipt_id: u64, kg: u64) -> Result<u64, Error> {
         receipt_id: released.receipt_id,
         lender: lock.lender,
         owner: released.owner.clone(),
+        warehouse_id: released.warehouse_id.clone(),
+        loan_ref: lock.loan_ref,
         kg: released.weight_kg,
         partial: remaining_receipt_id.is_some(),
         remaining_receipt_id,
@@ -195,9 +199,13 @@ pub fn extend_due(env: &Env, receipt_id: u64, new_due_date: u64) -> Result<(), E
     events::DueExtended {
         receipt_id,
         lender: lock.lender,
+        owner: receipt.owner,
+        warehouse_id: receipt.warehouse_id,
+        loan_ref: lock.loan_ref,
         kg: receipt.weight_kg,
         old_due_date,
         new_due_date,
+        grace_period: lock.grace_period,
         extended_at: env.ledger().timestamp(),
     }
     .publish(env);
@@ -225,9 +233,9 @@ pub fn start_recovery(env: &Env, receipt_id: u64) -> Result<(), Error> {
         started_at: now,
         resolution: RecoveryResolution::Open,
         resolved_at: None,
+        sale_id: None,
         buyer: None,
         sale_ref: None,
-        settlement_ref: None,
     });
     storage::set_receipt(env, &receipt);
     storage::bump_instance(env);
@@ -235,7 +243,9 @@ pub fn start_recovery(env: &Env, receipt_id: u64) -> Result<(), Error> {
     events::RecoveryStarted {
         receipt_id,
         lender: lock.lender,
+        warehouse_id: receipt.warehouse_id,
         owner: receipt.owner,
+        loan_ref: lock.loan_ref,
         kg: receipt.weight_kg,
         due_date: lock.due_date,
         grace_period: lock.grace_period,
@@ -252,8 +262,7 @@ pub fn complete_recovery(
     operator: Address,
     buyer: Address,
     sale_ref: String,
-    settlement_ref: String,
-) -> Result<(), Error> {
+) -> Result<u64, Error> {
     let mut receipt = load(env, receipt_id)?;
     if receipt.status != Status::Recovery {
         return Err(Error::InvalidStatus);
@@ -270,33 +279,102 @@ pub fn complete_recovery(
     }
 
     let now = env.ledger().timestamp();
+    let sale = Sale {
+        sale_id: storage::next_sale_id(env),
+        receipt_id,
+        warehouse_id: receipt.warehouse_id.clone(),
+        weight_kg: receipt.weight_kg,
+        lender: lock.lender.clone(),
+        loan_ref: lock.loan_ref.clone(),
+        operator: operator.clone(),
+        previous_owner: receipt.owner.clone(),
+        buyer: buyer.clone(),
+        sale_ref: sale_ref.clone(),
+        started_at: recovery.started_at,
+        completed_at: now,
+        settlement_ref: None,
+        settled_at: None,
+    };
+
     recovery.resolution = RecoveryResolution::Completed;
     recovery.resolved_at = Some(now);
+    recovery.sale_id = Some(sale.sale_id);
     recovery.buyer = Some(buyer.clone());
     recovery.sale_ref = Some(sale_ref.clone());
-    recovery.settlement_ref = Some(settlement_ref.clone());
 
-    let previous_owner = receipt.owner.clone();
-    receipt.recovery_history.push_back(recovery.clone());
+    receipt.recovery_history.push_back(recovery);
     receipt.recovery = MaybeRecovery::None;
     receipt.lock = MaybeLock::None;
     receipt.owner = buyer.clone();
     receipt.status = Status::Active;
     storage::set_receipt(env, &receipt);
+    storage::set_sale(env, &sale);
+    storage::push_unsettled_sale(env, sale.sale_id);
     storage::index_owner(env, &buyer, receipt_id);
     storage::bump_instance(env);
 
     events::RecoveryCompleted {
         receipt_id,
-        lender: lock.lender,
+        lender: sale.lender,
+        sale_id: sale.sale_id,
         operator,
-        previous_owner,
+        previous_owner: sale.previous_owner,
         buyer,
-        kg: receipt.weight_kg,
+        warehouse_id: sale.warehouse_id,
+        loan_ref: sale.loan_ref,
+        kg: sale.weight_kg,
         sale_ref,
-        settlement_ref,
-        started_at: recovery.started_at,
+        started_at: sale.started_at,
         completed_at: now,
+    }
+    .publish(env);
+    Ok(sale.sale_id)
+}
+
+/// See `ReceiptContract::record_settlement`.
+///
+/// The settlement is written to the `Sale`, not the receipt: by the time the
+/// bank settles, the buyer may already have split or exited the receipt,
+/// and every descendant's history resolves the settlement through
+/// `sale_id`.
+pub fn record_settlement(
+    env: &Env,
+    sale_id: u64,
+    operator: Address,
+    settlement_ref: String,
+) -> Result<(), Error> {
+    let mut sale = storage::get_sale(env, sale_id).ok_or(Error::SaleNotFound)?;
+
+    operator.require_auth();
+    sale.lender.require_auth();
+
+    if !admin::is_recovery_operator(env, &operator) {
+        return Err(Error::RecoveryOperatorNotRegistered);
+    }
+    if sale.settlement_ref.is_some() {
+        return Err(Error::RecoveryAlreadySettled);
+    }
+
+    let now = env.ledger().timestamp();
+    sale.settlement_ref = Some(settlement_ref.clone());
+    sale.settled_at = Some(now);
+    storage::set_sale(env, &sale);
+    storage::remove_unsettled_sale(env, sale_id);
+    storage::bump_instance(env);
+
+    events::SettlementRecorded {
+        sale_id,
+        lender: sale.lender,
+        receipt_id: sale.receipt_id,
+        operator,
+        previous_owner: sale.previous_owner,
+        buyer: sale.buyer,
+        warehouse_id: sale.warehouse_id,
+        loan_ref: sale.loan_ref,
+        kg: sale.weight_kg,
+        sale_ref: sale.sale_ref,
+        settlement_ref,
+        settled_at: now,
     }
     .publish(env);
     Ok(())

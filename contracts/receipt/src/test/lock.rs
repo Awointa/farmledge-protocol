@@ -405,6 +405,7 @@ fn full_lock_emits_one_locked_event_with_the_indexer_fields() {
         receipt_id: id,
         lender: l.lender.clone(),
         owner: l.f.farmer.clone(),
+        warehouse_id: l.f.warehouse.clone(),
         kg: 2_000,
         loan_ref: String::from_str(&env, LOAN_REF),
         due_date: DUE,
@@ -428,15 +429,21 @@ fn partial_lock_emits_split_then_locked() {
 
     let split = crate::events::Split {
         parent_id: parent,
+        owner: l.f.farmer.clone(),
+        warehouse_id: l.f.warehouse.clone(),
+        status: Status::Active,
         taken_id: locked,
         taken_weight_kg: 600,
+        taken_bag_count: 6,
         remainder_id: locked + 1,
         remainder_weight_kg: 1_400,
+        remainder_bag_count: 14,
     };
     let lock = crate::events::Locked {
         receipt_id: locked,
         lender: l.lender.clone(),
         owner: l.f.farmer.clone(),
+        warehouse_id: l.f.warehouse.clone(),
         kg: 600,
         loan_ref: String::from_str(&env, LOAN_REF),
         due_date: DUE,

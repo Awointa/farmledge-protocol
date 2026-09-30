@@ -10,13 +10,18 @@
 //! long-term has to be derivable from receipts in storage, and it is: every
 //! event here is a projection of a `Receipt` that remains readable.
 //!
-//! Every lending event carries `receipt_id` and `lender` as topics, plus the
-//! receipt's `kg` and the timestamps of the transition, so the backend
-//! indexer can follow a loan without reading storage. A partial lock or
-//! unlock is preceded in the same transaction by a `Split` event linking the
-//! new ids to their parent.
+//! **Every event is self-contained**: it carries everything the indexer
+//! needs to update its projection — owner, warehouse, weights, loan
+//! reference, timestamps — so it never has to read the receipt back.
+//! Lending events carry `receipt_id` and `lender` as topics. A partial exit,
+//! lock or unlock is preceded in the same transaction by a `Split` event
+//! linking the new ids to their parent.
 
 use soroban_sdk::{contractevent, Address, Env, String, Symbol};
+
+use crate::types::{Status, WeightSource};
+
+// --- receipt lifecycle -----------------------------------------------------
 
 #[contractevent]
 pub struct Minted {
@@ -26,37 +31,62 @@ pub struct Minted {
     pub warehouse_id: Symbol,
     pub deposit_id: String,
     pub owner: Address,
+    pub commodity: Symbol,
+    pub grade: Symbol,
     pub weight_kg: u64,
+    pub weight_source: WeightSource,
+    pub bag_count: u32,
+    pub moisture_pct: u32,
+    pub custodian: Address,
+    pub verifier: Address,
+    pub deposit_date: u64,
 }
 
-/// Emitted once per split, carrying both children. The two child weights
-/// always sum to the parent's.
+/// Emitted once per split, carrying both children. Weights and bag counts
+/// each sum to the parent's; both children inherit `owner`, `warehouse_id`
+/// and `status` from it, and the caller's own event then says what became of
+/// the taken child.
 #[contractevent]
 pub struct Split {
     #[topic]
     pub parent_id: u64,
+    pub owner: Address,
+    pub warehouse_id: Symbol,
+    pub status: Status,
     pub taken_id: u64,
     pub taken_weight_kg: u64,
+    pub taken_bag_count: u32,
     pub remainder_id: u64,
     pub remainder_weight_kg: u64,
+    pub remainder_bag_count: u32,
 }
 
 #[contractevent]
 pub struct Exited {
     #[topic]
     pub receipt_id: u64,
+    #[topic]
+    pub warehouse_id: Symbol,
+    pub owner: Address,
     pub custodian: Address,
     /// Book weight the receipt was denominated in.
     pub weight_kg: u64,
+    pub bag_count: u32,
     /// What it actually weighed leaving the warehouse.
     pub exit_weight_kg: u64,
+    pub exit_date: u64,
 }
 
 #[contractevent]
 pub struct Revoked {
     #[topic]
     pub receipt_id: u64,
+    #[topic]
+    pub warehouse_id: Symbol,
+    pub owner: Address,
+    pub weight_kg: u64,
     pub reason: String,
+    pub revoked_at: u64,
 }
 
 #[contractevent]
@@ -65,6 +95,8 @@ pub struct TtlExtended {
     pub receipt_id: u64,
 }
 
+// --- lending ---------------------------------------------------------------
+
 #[contractevent]
 pub struct Locked {
     #[topic]
@@ -72,6 +104,7 @@ pub struct Locked {
     #[topic]
     pub lender: Address,
     pub owner: Address,
+    pub warehouse_id: Symbol,
     pub kg: u64,
     pub loan_ref: String,
     pub due_date: u64,
@@ -80,7 +113,8 @@ pub struct Locked {
 }
 
 /// `receipt_id` is the released receipt. On a partial unlock
-/// `remaining_receipt_id` is the portion still `Locked` / in `Recovery`.
+/// `remaining_receipt_id` is the portion still `Locked` / in `Recovery`,
+/// whose weight is `remainder_weight_kg` on the preceding `Split`.
 #[contractevent]
 pub struct Unlocked {
     #[topic]
@@ -88,6 +122,8 @@ pub struct Unlocked {
     #[topic]
     pub lender: Address,
     pub owner: Address,
+    pub warehouse_id: Symbol,
+    pub loan_ref: String,
     pub kg: u64,
     pub partial: bool,
     pub remaining_receipt_id: Option<u64>,
@@ -95,25 +131,36 @@ pub struct Unlocked {
     pub unlocked_at: u64,
 }
 
+/// The farmer is notified of an extension (design doc §5.4), so `owner` is
+/// carried.
 #[contractevent]
 pub struct DueExtended {
     #[topic]
     pub receipt_id: u64,
     #[topic]
     pub lender: Address,
+    pub owner: Address,
+    pub warehouse_id: Symbol,
+    pub loan_ref: String,
     pub kg: u64,
     pub old_due_date: u64,
     pub new_due_date: u64,
+    pub grace_period: u64,
     pub extended_at: u64,
 }
 
+/// `warehouse_id` is a topic so the custodian's notification (design doc
+/// §5.5.2) can be routed by filter alone.
 #[contractevent]
 pub struct RecoveryStarted {
     #[topic]
     pub receipt_id: u64,
     #[topic]
     pub lender: Address,
+    #[topic]
+    pub warehouse_id: Symbol,
     pub owner: Address,
+    pub loan_ref: String,
     pub kg: u64,
     pub due_date: u64,
     pub grace_period: u64,
@@ -126,15 +173,37 @@ pub struct RecoveryCompleted {
     pub receipt_id: u64,
     #[topic]
     pub lender: Address,
+    pub sale_id: u64,
     pub operator: Address,
     pub previous_owner: Address,
     pub buyer: Address,
+    pub warehouse_id: Symbol,
+    pub loan_ref: String,
     pub kg: u64,
     pub sale_ref: String,
-    pub settlement_ref: String,
     pub started_at: u64,
     pub completed_at: u64,
 }
+
+#[contractevent]
+pub struct SettlementRecorded {
+    #[topic]
+    pub sale_id: u64,
+    #[topic]
+    pub lender: Address,
+    pub receipt_id: u64,
+    pub operator: Address,
+    pub previous_owner: Address,
+    pub buyer: Address,
+    pub warehouse_id: Symbol,
+    pub loan_ref: String,
+    pub kg: u64,
+    pub sale_ref: String,
+    pub settlement_ref: String,
+    pub settled_at: u64,
+}
+
+// --- registries ------------------------------------------------------------
 
 #[contractevent]
 pub struct WarehouseAdded {
@@ -188,73 +257,9 @@ pub struct RecoveryOperatorRemoved {
 
 // --- emit helpers ----------------------------------------------------------
 
-pub fn minted(
-    env: &Env,
-    receipt_id: u64,
-    warehouse_id: &Symbol,
-    deposit_id: &String,
-    owner: &Address,
-    weight_kg: u64,
-) {
-    Minted {
-        receipt_id,
-        warehouse_id: warehouse_id.clone(),
-        deposit_id: deposit_id.clone(),
-        owner: owner.clone(),
-        weight_kg,
-    }
-    .publish(env);
-}
-
-pub fn split(
-    env: &Env,
-    parent_id: u64,
-    taken_id: u64,
-    taken_weight_kg: u64,
-    remainder_id: u64,
-    remainder_weight_kg: u64,
-) {
-    Split {
-        parent_id,
-        taken_id,
-        taken_weight_kg,
-        remainder_id,
-        remainder_weight_kg,
-    }
-    .publish(env);
-}
-
-pub fn exited(
-    env: &Env,
-    receipt_id: u64,
-    custodian: &Address,
-    weight_kg: u64,
-    exit_weight_kg: u64,
-) {
-    Exited {
-        receipt_id,
-        custodian: custodian.clone(),
-        weight_kg,
-        exit_weight_kg,
-    }
-    .publish(env);
-}
-
-pub fn revoked(env: &Env, receipt_id: u64, reason: &String) {
-    Revoked {
-        receipt_id,
-        reason: reason.clone(),
-    }
-    .publish(env);
-}
-
-pub fn ttl_extended(env: &Env, receipt_id: u64) {
-    TtlExtended { receipt_id }.publish(env);
-}
-
-// Lending events are built by the caller (`lending.rs`) and published
-// directly: their payloads are wide enough that a positional helper would be
-// easier to misorder than the named struct literal.
+// Receipt and lending events are published as named struct literals at the
+// call site: their payloads are wide enough that a positional helper would be
+// easy to misorder. Registry events are narrow and keep helpers.
 
 pub fn warehouse_added(env: &Env, warehouse_id: &Symbol) {
     WarehouseAdded {
