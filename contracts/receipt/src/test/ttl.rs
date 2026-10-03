@@ -390,3 +390,116 @@ fn state_changes_refresh_the_contract_instance() {
     f.mint(&env, "DEP-A");
     assert_eq!(instance_ttl(&env, &f), INSTANCE_TTL_EXTEND_TO);
 }
+
+// --- finished receipts are left to archive --------------------------------
+
+/// `Exited` and `Revoked` receipts can never be acted on again, so the
+/// keep-alive skips them: no bump for the receipt or its deposit guard, no
+/// event, and they do not count as extended.
+#[test]
+fn extend_ttl_batch_skips_exited_and_revoked_receipts() {
+    use soroban_sdk::{testutils::Events as _, Event as _};
+
+    let env = Env::default();
+    let f = setup(&env);
+    let live = f.mint(&env, "DEP-LIVE");
+    let exited = f.mint(&env, "DEP-EXITED");
+    let revoked = f.mint(&env, "DEP-REVOKED");
+    f.client.exit(&exited, &f.custodian, &2_000, &2_000);
+    f.client
+        .revoke(&revoked, &soroban_sdk::String::from_str(&env, "fraud"));
+
+    env.ledger().set_sequence_number(150 * DAY_IN_LEDGERS);
+    assert_eq!(
+        f.client
+            .extend_ttl_batch(&ids(&env, &[live, exited, revoked])),
+        1
+    );
+    let only_live = crate::events::TtlExtended {
+        receipt_id: live,
+        warehouse_id: f.warehouse.clone(),
+        owner: f.farmer.clone(),
+        status: crate::Status::Active,
+        weight_kg: 2_000,
+        extended_at: env.ledger().timestamp(),
+    };
+    assert_eq!(
+        env.events().all(),
+        std::vec![only_live.to_xdr(&env, &f.contract_id)],
+        "one event, for the live receipt"
+    );
+
+    assert_eq!(receipt_ttl(&env, &f, live), ENTRY_TTL_EXTEND_TO);
+    for (id, deposit) in [(exited, "DEP-EXITED"), (revoked, "DEP-REVOKED")] {
+        assert!(receipt_ttl(&env, &f, id) < ENTRY_TTL_THRESHOLD);
+        let guard = DataKey::DepositIndex(soroban_sdk::String::from_str(&env, deposit));
+        assert!(ttl_of(&env, &f, &guard) < ENTRY_TTL_THRESHOLD);
+    }
+}
+
+/// After a partial exit the receipt that kept the rest is still live and
+/// still kept alive, along with the deposit guard it shares with the
+/// exited part.
+#[test]
+fn after_a_partial_exit_only_the_exited_part_is_left_to_archive() {
+    let env = Env::default();
+    let f = setup(&env);
+    let id = f.mint(&env, "DEP-PART");
+    let gone = f.client.exit(&id, &f.custodian, &500, &500);
+
+    env.ledger().set_sequence_number(150 * DAY_IN_LEDGERS);
+    assert_eq!(f.client.extend_ttl_batch(&ids(&env, &[id, gone])), 1);
+    assert_eq!(receipt_ttl(&env, &f, id), ENTRY_TTL_EXTEND_TO);
+    assert!(receipt_ttl(&env, &f, gone) < ENTRY_TTL_THRESHOLD);
+    let guard = DataKey::DepositIndex(soroban_sdk::String::from_str(&env, "DEP-PART"));
+    assert_eq!(ttl_of(&env, &f, &guard), ENTRY_TTL_EXTEND_TO);
+}
+
+/// Letting a finished receipt archive also lets its deposit guard archive.
+/// That must not reopen the deposit id: an archived guard is restored when
+/// the duplicate mint reads it, and the mint is still refused. The
+/// archived receipt itself reads back intact.
+#[test]
+fn an_archived_deposit_guard_still_blocks_a_duplicate_mint() {
+    let env = Env::default();
+    let f = setup(&env);
+    let id = f.mint(&env, "DEP-DONE");
+    f.client.exit(&id, &f.custodian, &2_000, &1_990);
+    let before = f.client.get_receipt(&id);
+    let keep_instance = f.mint(&env, "DEP-OTHER");
+
+    // The keep-alive skips the exited receipt, so its guard ages out.
+    env.ledger().set_sequence_number(150 * DAY_IN_LEDGERS);
+    assert_eq!(
+        f.client.extend_ttl_batch(&ids(&env, &[keep_instance, id])),
+        1
+    );
+    let guard = DataKey::DepositIndex(soroban_sdk::String::from_str(&env, "DEP-DONE"));
+    let live_until = 150 * DAY_IN_LEDGERS + ttl_of(&env, &f, &guard);
+    // Reading a TTL restores the entry, so archival is shown by arithmetic:
+    // the ledger moves past the guard's last live ledger.
+    env.ledger()
+        .set_sequence_number(ENTRY_TTL_EXTEND_TO + DAY_IN_LEDGERS);
+    assert!(
+        env.ledger().sequence() > live_until,
+        "the guard has archived"
+    );
+
+    assert_eq!(
+        f.client.try_mint(
+            &f.custodian,
+            &f.verifier,
+            &soroban_sdk::String::from_str(&env, "DEP-DONE"),
+            &f.farmer,
+            &f.warehouse,
+            &soroban_sdk::Symbol::new(&env, super::COMMODITY),
+            &soroban_sdk::Symbol::new(&env, super::GRADE),
+            &2_000,
+            &crate::WeightSource::Scale,
+            &20,
+            &super::MOISTURE,
+        ),
+        Err(Ok(Error::DuplicateDepositId))
+    );
+    assert_eq!(f.client.get_receipt(&id), before);
+}

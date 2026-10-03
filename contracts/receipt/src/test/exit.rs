@@ -3,7 +3,7 @@ use soroban_sdk::{
     Address, Env, IntoVal, String, Symbol,
 };
 
-use super::{live_weight, setup, Fixture};
+use super::{setup, total_weight, Fixture};
 use crate::{Error, Status};
 
 #[test]
@@ -27,46 +27,48 @@ fn full_exit_retires_the_receipt_and_records_exit_weight() {
 }
 
 #[test]
-fn partial_exit_splits_and_the_remainder_stays_active() {
+fn partial_exit_splits_in_place_and_the_remainder_stays_active() {
     let env = Env::default();
     let f = setup(&env);
 
     let parent_id = f.mint(&env, "DEP-0001"); // 2,000kg, 20 bags
+    let before = f.client.get_receipt(&parent_id);
     let exited_id = f.client.exit(&parent_id, &f.custodian, &500, &498);
 
-    let parent = f.client.get_receipt(&parent_id);
+    // One new receipt, the next id.
+    assert_eq!(exited_id, parent_id + 1);
+    let remainder = f.client.get_receipt(&parent_id);
     let exited = f.client.get_receipt(&exited_id);
-    // The split allocates `taken` first, then `remainder`.
-    let remainder = f.client.get_receipt(&(exited_id + 1));
 
-    // Parent is retired and never touched again.
-    assert_eq!(parent.status, Status::Split);
-    assert_eq!(parent.weight_kg, 2_000);
-    assert_eq!(parent.exit_weight_kg, None);
-
-    // Children sum to the parent, exactly.
-    assert_eq!(exited.weight_kg + remainder.weight_kg, parent.weight_kg);
-    assert_eq!(exited.weight_kg, 500);
-    assert_eq!(remainder.weight_kg, 1_500);
-
-    // Both carry lineage.
-    assert_eq!(exited.parent_id, Some(parent_id));
-    assert_eq!(remainder.parent_id, Some(parent_id));
-
-    // The exited portion is retired with its real weight; the rest stays live.
-    assert_eq!(exited.status, Status::Exited);
-    assert_eq!(exited.exit_weight_kg, Some(498));
+    // The parent keeps its id and the rest of the weight, still live.
     assert_eq!(remainder.status, Status::Active);
+    assert_eq!(remainder.weight_kg, 1_500);
     assert_eq!(remainder.exit_weight_kg, None);
     assert_eq!(remainder.exit_date, None);
+    assert_eq!(remainder.parent_id, None, "it is still the minted receipt");
+
+    // The two sum to what the parent held, exactly.
+    assert_eq!(exited.weight_kg + remainder.weight_kg, before.weight_kg);
+    assert_eq!(exited.weight_kg, 500);
+
+    // The new receipt carries lineage and is retired with its real weight.
+    assert_eq!(exited.parent_id, Some(parent_id));
+    assert_eq!(exited.status, Status::Exited);
+    assert_eq!(exited.exit_weight_kg, Some(498));
 
     // Identity is inherited: same deposit, same owner, same attesters.
-    assert_eq!(remainder.deposit_id, String::from_str(&env, "DEP-0001"));
-    assert_eq!(remainder.owner, parent.owner);
-    assert_eq!(remainder.custodian, parent.custodian);
-    assert_eq!(remainder.verifier, parent.verifier);
-    assert_eq!(remainder.commodity, parent.commodity);
-    assert_eq!(remainder.deposit_date, parent.deposit_date);
+    assert_eq!(exited.deposit_id, String::from_str(&env, "DEP-0001"));
+    assert_eq!(exited.owner, before.owner);
+    assert_eq!(exited.custodian, before.custodian);
+    assert_eq!(exited.verifier, before.verifier);
+    assert_eq!(exited.commodity, before.commodity);
+    assert_eq!(exited.deposit_date, before.deposit_date);
+
+    // Nothing else about the parent changed.
+    let mut expected = before.clone();
+    expected.weight_kg = 1_500;
+    expected.bag_count = 15;
+    assert_eq!(remainder, expected);
 }
 
 #[test]
@@ -78,7 +80,7 @@ fn partial_exit_prorates_bag_count_without_losing_a_bag() {
     let exited_id = f.client.exit(&parent_id, &f.custodian, &500, &500);
 
     let exited = f.client.get_receipt(&exited_id);
-    let remainder = f.client.get_receipt(&(exited_id + 1));
+    let remainder = f.client.get_receipt(&parent_id);
 
     assert_eq!(exited.bag_count, 5, "500/2000 of 20 bags");
     assert_eq!(remainder.bag_count, 15);
@@ -96,7 +98,7 @@ fn a_sub_bag_withdrawal_rounds_bags_to_zero_and_still_conserves_them() {
     let exited_id = f.client.exit(&parent_id, &f.custodian, &1, &1);
 
     let exited = f.client.get_receipt(&exited_id);
-    let remainder = f.client.get_receipt(&(exited_id + 1));
+    let remainder = f.client.get_receipt(&parent_id);
 
     assert_eq!(exited.bag_count, 0);
     assert_eq!(remainder.bag_count, 20);
@@ -108,33 +110,42 @@ fn repeated_partial_exits_conserve_total_weight() {
     let env = Env::default();
     let f = setup(&env);
 
-    let mut active = f.mint_weighing(&env, "DEP-SEQ", 10_000, 100);
+    let id = f.mint_weighing(&env, "DEP-SEQ", 10_000, 100);
+    let mut highest = id;
 
     for kg in [1_000u64, 2_500, 750, 3_000] {
-        f.client.exit(&active, &f.custodian, &kg, &kg);
-        // The remainder is always the id after the exited child.
-        active += 2;
+        // The same receipt every time: it keeps the remainder.
+        highest = f.client.exit(&id, &f.custodian, &kg, &kg);
     }
 
-    let remaining = f.client.get_receipt(&active);
+    assert_eq!(highest, id + 4, "one new receipt per partial exit");
+    let remaining = f.client.get_receipt(&id);
     assert_eq!(remaining.status, Status::Active);
     assert_eq!(remaining.weight_kg, 10_000 - (1_000 + 2_500 + 750 + 3_000));
-    assert_eq!(live_weight(&f, active), 10_000);
+    assert_eq!(total_weight(&f, highest), 10_000);
 }
 
 #[test]
-fn split_children_are_indexed_for_owner_and_warehouse() {
+fn a_split_off_receipt_is_indexed_for_owner_and_warehouse() {
     let env = Env::default();
     let f = setup(&env);
 
     let parent_id = f.mint(&env, "DEP-IDX");
-    f.client.exit(&parent_id, &f.custodian, &500, &500);
+    let exited_id = f.client.exit(&parent_id, &f.custodian, &500, &500);
 
-    // parent + two children
-    assert_eq!(f.client.get_receipts_by_owner(&f.farmer, &0).len(), 3);
+    // The parent, once, plus the one new receipt.
+    let ids = |rs: soroban_sdk::Vec<crate::Receipt>| {
+        rs.iter()
+            .map(|r| r.receipt_id)
+            .collect::<std::vec::Vec<_>>()
+    };
     assert_eq!(
-        f.client.get_receipts_by_warehouse(&f.warehouse, &0).len(),
-        3
+        ids(f.client.get_receipts_by_owner(&f.farmer, &0)),
+        std::vec![parent_id, exited_id]
+    );
+    assert_eq!(
+        ids(f.client.get_receipts_by_warehouse(&f.warehouse, &0)),
+        std::vec![parent_id, exited_id]
     );
 }
 
@@ -284,14 +295,15 @@ fn exit_rejects_anything_not_active() {
         Err(Ok(Error::InvalidStatus))
     );
 
-    // A retired split parent.
+    // The exited portion of a partial exit.
     let parent = f.mint(&env, "DEP-SPLIT");
-    f.client.exit(&parent, &f.custodian, &500, &500);
-    assert_eq!(f.client.get_receipt(&parent).status, Status::Split);
+    let gone = f.client.exit(&parent, &f.custodian, &500, &500);
     assert_eq!(
-        f.client.try_exit(&parent, &f.custodian, &1, &1),
+        f.client.try_exit(&gone, &f.custodian, &1, &1),
         Err(Ok(Error::InvalidStatus))
     );
+    // ...while the parent, which kept the rest, can still exit.
+    f.client.exit(&parent, &f.custodian, &1_500, &1_500);
 }
 
 #[test]
@@ -352,7 +364,7 @@ fn partial_exit_emits_split_then_exited() {
         taken_id: exited_id,
         taken_weight_kg: 500,
         taken_bag_count: 5,
-        remainder_id: exited_id + 1,
+        remainder_id: parent_id,
         remainder_weight_kg: 1_500,
         remainder_bag_count: 15,
         split_at: env.ledger().timestamp(),
@@ -383,7 +395,7 @@ fn partial_exit_emits_split_then_exited() {
 // also exercised on its own rather than only through its callers.
 
 #[test]
-fn the_split_helper_returns_both_children_and_retires_the_parent() {
+fn the_split_helper_reduces_the_parent_in_place_and_adds_one_receipt() {
     let env = Env::default();
     let f = setup(&env);
     let id = f.mint(&env, "DEP-HELPER");
@@ -400,13 +412,17 @@ fn the_split_helper_returns_both_children_and_retires_the_parent() {
         parent.weight_kg
     );
     assert_eq!(parts.taken.parent_id, Some(id));
-    assert_eq!(parts.remainder.parent_id, Some(id));
+    assert_eq!(parts.taken.receipt_id, id + 1);
+    assert_eq!(
+        parts.remainder.receipt_id, id,
+        "the parent is the remainder"
+    );
+    assert_eq!(parts.remainder.parent_id, None);
 
     // The helper divides; it does not decide what the pieces become. Both
-    // children inherit the parent's status and the caller mutates from there.
+    // keep the parent's status and the caller mutates from there.
     assert_eq!(parts.taken.status, Status::Active);
     assert_eq!(parts.remainder.status, Status::Active);
-    assert_eq!(f.client.get_receipt(&id).status, Status::Split);
 
     // Both were persisted, not just returned.
     assert_eq!(f.client.get_receipt(&parts.taken.receipt_id).weight_kg, 750);

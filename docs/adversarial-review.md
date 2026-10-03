@@ -18,7 +18,7 @@ outside this repo.
 | F3 | Pledged without the farmer's consent | `lock` requires the owner's auth | `lock::lock_fails_with_only_the_lenders_signature` |
 | F4 | The farmer approves 500 kg, and the approval is used to pledge 2,000 kg | auth is bound to the call's arguments | **NEW** `adversarial::an_owner_signature_for_a_small_pledge_cannot_pledge_more` |
 | F5 | The approval is replayed with an earlier due date (instant default) | same | **NEW** `adversarial::an_owner_signature_cannot_be_moved_to_an_earlier_due_date` |
-| F6 | A partial pledge takes more than requested, or the free remainder is lost or tied up | split gives the remainder back as an independent `Active` receipt | `lock::partial_lock_splits_and_leaves_the_remainder_active_under_the_owner`, `unlock::acting_on_the_free_remainder_never_touches_the_locked_portion`, `unlock::acting_on_the_locked_portion_never_touches_the_free_remainder` |
+| F6 | A partial pledge takes more than requested, or the free remainder is lost or tied up | the split leaves the remainder on the original receipt, `Active` and independent | `lock::partial_lock_splits_in_place_and_leaves_the_remainder_active_under_the_owner`, `unlock::acting_on_the_free_remainder_never_touches_the_locked_portion`, `unlock::acting_on_the_locked_portion_never_touches_the_free_remainder` |
 | F7 | Recovery starts before due date + grace | strict `now > due + grace` | `recovery::start_recovery_before_due_plus_grace_fails_and_one_second_after_succeeds` |
 | F8 | Someone other than the recorded lender starts recovery | recorded lender's auth | `recovery::start_recovery_by_the_owner_or_another_lender_fails` |
 | F9 | The lender shortens the loan | `extend_due` only moves later | `unlock::extend_due_to_an_earlier_or_equal_date_fails` |
@@ -28,17 +28,19 @@ outside this repo.
 | F13 | Sold without a recovery having started | `Recovery` status required | `recovery::complete_recovery_from_locked_fails`, `recovery::complete_recovery_from_active_fails` |
 | F14 | The signed sale is redirected to a different buyer | auth bound to `buyer` | **NEW** `adversarial::a_completed_sale_cannot_be_redirected_to_another_buyer` |
 | F15 | Unlocking during recovery hands the grain to the lender | released grain goes to `owner` | `recovery::unlock_during_recovery_returns_the_receipt_to_the_owner_not_the_lender` |
-| F16 | The lender acts on a retired `Split` parent that still carries its lock, creating phantom grain or selling grain already released | status gate before any lender action | **NEW** `adversarial::a_lender_cannot_act_on_a_retired_split_parent`, `prop_lifecycle` |
-| F17 | A split loses kilograms or bags | one split helper, conservation | `prop_split::*`, `prop_lifecycle` (invariant 1) |
+| F16 | After a partial unlock the lender acts on the released receipt, or unlocks or sells more than is still pledged, creating phantom grain or selling grain already released | the released receipt carries no lock; the pledged one is reduced in place to what is left | **NEW** `adversarial::a_partial_unlock_leaves_the_lender_only_what_is_still_pledged`, `prop_lifecycle` |
+| F17 | A split loses kilograms or bags | one split helper; the receipts of a deposit always sum to the minted weight, and a receipt's weight never grows | `prop_split::*`, `prop_lifecycle` (invariant 1) |
 | F18 | The admin voids a pledged receipt | revoke is `Active`-only | `lock::revoke_from_locked_fails`, `recovery::exit_and_revoke_on_a_receipt_in_recovery_fail` |
 | F19 | A non-admin voids a receipt | stored admin's auth | `revoke::revoke_is_admin_only` |
 | F20 | Deregistering a warehouse traps the grain in it | custodian registrations survive and still authorise exits | **NEW** `adversarial::removing_a_warehouse_does_not_trap_the_grain_in_it` |
-| F21 | Split children don't show up in the owner's list | both children indexed | `exit::split_children_are_indexed_for_owner_and_warehouse` |
+| F21 | A receipt split off doesn't show up in the owner's list | the new receipt is indexed; the original already is | `exit::a_split_off_receipt_is_indexed_for_owner_and_warehouse` |
 | F22 | A receipt is archived and treated as lost | persistent entries restore intact | **NEW** `ttl::an_archived_receipt_is_restored_intact_and_needs_extending_again` |
 | F23 | A full index page ages out while the index is in use | `extend_index_ttl` | **NEW** `ttl::a_full_index_page_ages_even_while_the_index_is_in_use` |
 | F24 | Someone claims the contract between deploy and `initialize` and registers their own custodians | **fixed:** a constructor installs the admin in the deploy transaction | **NEW** `registry::the_constructor_installs_the_admin_in_the_deploy_itself` |
 | F25 | The Wasm is replaced to rewrite ownership | contract is immutable | `make check-immutable` (CI) |
 | F26 | A rejected call leaves partial state behind | all-or-nothing calls | `prop_lifecycle` (no side effects on rejection) |
+| F27 | A finished receipt archives, its deposit guard with it, and the same intake is minted again | the archived guard is restored when the duplicate mint reads it, and the mint is refused | **NEW** `ttl::an_archived_deposit_guard_still_blocks_a_duplicate_mint` |
+| F28 | A stored record is misread as a different status or weight source | unknown stored codes abort with `CorruptRecord` | **NEW** `layout::an_unknown_stored_code_is_a_corrupt_record`, `layout::the_layout_is_lossless` |
 
 ## b. A lender loses collateral it is rightfully owed
 
@@ -51,15 +53,15 @@ outside this repo.
 | L5 | A different lender releases it | same | `unlock::unlock_by_a_different_lender_fails` |
 | L6 | Double pledge while `Locked` | `Active`-only lock | `lock::lock_on_an_already_locked_receipt_fails` |
 | L7 | Double pledge while in `Recovery` | same | **NEW** `adversarial::a_receipt_in_recovery_cannot_be_pledged_again` |
-| L8 | The owner re-uses weight through a retired `Split` parent | `Split` is terminal | `lock::lock_rejects_exited_revoked_and_split_receipts`, `exit::exit_rejects_anything_not_active` |
+| L8 | The owner re-uses weight that has already been split off, exited or revoked | a split reduces the original in place, so the weight exists once; `Exited` and `Revoked` are terminal | `lock::lock_rejects_exited_and_revoked_receipts_and_more_than_remains`, `exit::exit_rejects_anything_not_active`, `prop_lifecycle` (invariant 1) |
 | L9 | A lender's release signature is replayed onto a different receipt | auth bound to `receipt_id` | **NEW** `adversarial::a_lender_signature_to_release_one_receipt_cannot_release_another` |
-| L10 | A partial release frees more than intended, or the remainder loses its pledge | split keeps lock and recovery on the remainder | `unlock::partial_unlock_releases_a_portion_and_keeps_the_rest_locked`, `recovery::partial_unlock_during_recovery_keeps_the_rest_in_recovery`, `unlock::unlock_rejects_impossible_quantities` |
-| L11 | Still-pledged split children drop out of the lender's list | children of pledged receipts are indexed under the lender | `lock::locked_receipts_are_indexed_under_the_lender` |
+| L10 | A partial release frees more than intended, or the remainder loses its pledge | the original receipt keeps its lock and recovery, with the rest of the weight | `unlock::partial_unlock_releases_a_portion_and_keeps_the_rest_locked`, `recovery::partial_unlock_during_recovery_keeps_the_rest_in_recovery`, `unlock::unlock_rejects_impossible_quantities` |
+| L11 | A receipt split off a pledged one drops out of the lender's list | it is indexed under the lender; the original already is | `lock::locked_receipts_are_indexed_under_the_lender` |
 | L12 | The farmer extends the due date | recorded lender's auth | `unlock::extend_due_by_the_owner_or_another_lender_fails` |
 | L13 | The operator sells alone | lender co-signs | `recovery::complete_recovery_with_only_the_operator_fails` |
 | L14 | The operator records a settlement alone | lender co-signs (see question Q1) | `settlement::record_settlement_with_only_the_operator_fails`, `settlement::record_settlement_with_the_operator_and_a_different_lender_fails` |
 | L15 | A settlement is overwritten | write-once | `settlement::a_settlement_is_write_once`, `prop_lifecycle` (invariant 3) |
-| L16 | After the buyer splits, a settlement attaches to the wrong sale or a child can't resolve it | settlement lives on the canonical `Sale` | `settlement::a_settlement_recorded_after_the_buyer_splits_reaches_every_child`, `prop_lifecycle` (invariant 4) |
+| L16 | After the buyer splits, a settlement attaches to the wrong sale or a receipt can't resolve it | settlement lives on the canonical `Sale` | `settlement::a_settlement_recorded_after_the_buyer_splits_reaches_every_receipt`, `prop_lifecycle` (invariant 4) |
 | L17 | Two sales of the same lineage get confused | one `sale_id` per sale | `settlement::a_receipt_sold_twice_has_two_independently_settled_sales` |
 | L18 | The previous owner still moves grain that was sold (a loss for the buyer, and so for the lender's recovery) | ownership passes to the buyer | **NEW** `adversarial::the_previous_owner_cannot_exit_or_pledge_sold_grain` |
 | L19 | The old lock is reused after the sale | lock cleared on completion | **NEW** `adversarial::the_lender_has_no_power_over_grain_after_its_sale` |
@@ -67,6 +69,7 @@ outside this repo.
 | L21 | The lender can't find its sales to reconcile settlements | `get_sales_by_lender` | **NEW** `reads::sales_are_listed_per_lender_settled_or_not`, **NEW** `reads::lender_sale_pages_roll_over_at_64` |
 | L22 | The indexer loses track of collateral across a split of a pledged receipt | `split` now carries `lender` | `unlock::unlocked_event_marks_a_partial_release` (updated) |
 | L23 | Deploy-time hijack, or a Wasm upgrade | as F24, F25 | as F24, F25 |
+| L24 | A lender (lenders are not registered) passes a huge `loan_ref`, inflating the rent of every entry that copies it, which the keep-alive job pays | `loan_ref`, `sale_ref` and `settlement_ref` capped at `MAX_REF_LEN` (64 bytes) | **NEW** `adversarial::refs_longer_than_the_cap_are_rejected_and_change_nothing` |
 
 ## Losses the contract cannot prevent
 

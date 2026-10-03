@@ -9,7 +9,7 @@ use soroban_sdk::{
     Address, Env, IntoVal, String,
 };
 
-use super::{live_weight, next_id, setup_lending, sign_only, Lending, DUE, GRACE, LOAN_REF};
+use super::{next_id, setup_lending, sign_only, total_weight, Lending, DUE, GRACE, LOAN_REF};
 use crate::{Error, Status};
 
 fn loan_ref(env: &Env) -> String {
@@ -146,34 +146,55 @@ fn a_completed_sale_cannot_be_redirected_to_another_buyer() {
     assert_eq!(l.f.client.get_receipt(&id).owner, agreed);
 }
 
-// --- farmer: a retired split parent stays retired --------------------------
+// --- farmer: a partial unlock really releases ------------------------------
 
-/// After a partial unlock the `Split` parent still carries the lock it had.
-/// If the lender could act on it, an unlock would mint a second, phantom
-/// copy of grain the farmer already has back — and a recovery could sell it.
+/// A partial unlock reduces the pledged receipt in place and releases the
+/// rest as a new receipt. The lender keeps a pledge over exactly what is
+/// left: it cannot touch the released receipt, and cannot unlock or sell
+/// more than the remainder — either would conjure phantom grain the farmer
+/// already has back.
 #[test]
-fn a_lender_cannot_act_on_a_retired_split_parent() {
+fn a_partial_unlock_leaves_the_lender_only_what_is_still_pledged() {
     let env = Env::default();
     let l = setup_lending(&env);
     let id = l.f.mint(&env, "DEP-1");
     l.lock(&env, id, 2_000);
-    l.f.client.unlock(&id, &500);
-    assert_eq!(l.f.client.get_receipt(&id).status, Status::Split);
+    let released = l.f.client.unlock(&id, &500);
 
+    let pledged = l.f.client.get_receipt(&id);
+    assert_eq!(pledged.status, Status::Locked);
+    assert_eq!(pledged.weight_kg, 1_500);
+    assert_eq!(l.f.client.get_receipt(&released).status, Status::Active);
+
+    // Nothing on the released receipt.
     assert_eq!(
-        l.f.client.try_unlock(&id, &2_000),
+        l.f.client.try_unlock(&released, &500),
         Err(Ok(Error::InvalidStatus))
     );
     assert_eq!(
-        l.f.client.try_extend_due(&id, &(DUE + 1)),
+        l.f.client.try_extend_due(&released, &(DUE + 1)),
         Err(Ok(Error::InvalidStatus))
+    );
+    // No more than the remainder on the pledged one.
+    assert_eq!(
+        l.f.client.try_unlock(&id, &2_000),
+        Err(Ok(Error::InvalidSplitAmount))
     );
     env.ledger().set_timestamp(DUE + GRACE + 1);
     assert_eq!(
-        l.f.client.try_start_recovery(&id),
+        l.f.client.try_start_recovery(&released),
         Err(Ok(Error::InvalidStatus))
     );
-    assert_eq!(live_weight(&l.f, next_id(&l.f) - 1), 2_000);
+    l.f.client.start_recovery(&id);
+    let buyer = soroban_sdk::Address::generate(&env);
+    let sale = l.complete(&env, id, &buyer);
+    assert_eq!(
+        l.f.client.get_sale(&sale).weight_kg,
+        1_500,
+        "only the remainder is sold"
+    );
+    assert_eq!(l.f.client.get_receipt(&released).owner, l.f.farmer);
+    assert_eq!(total_weight(&l.f, next_id(&l.f) - 1), 2_000);
 }
 
 // --- farmer: deregistration does not trap grain ----------------------------
@@ -356,4 +377,53 @@ fn the_lender_has_no_power_over_grain_after_its_sale() {
         Err(Ok(Error::InvalidStatus))
     );
     assert_eq!(l.f.client.get_receipt(&id).owner, buyer);
+}
+
+// --- everyone: refs are bounded ---------------------------------------------
+
+fn text(env: &Env, len: usize) -> String {
+    String::from_str(env, &"x".repeat(len))
+}
+
+/// `loan_ref`, `sale_ref` and `settlement_ref` are copied into the lock,
+/// every recovery record, the sale and every receipt split off. Unbounded,
+/// a lender could inflate the rent of entries the keep-alive job pays for.
+/// Each is capped at `MAX_REF_LEN` bytes, and an over-long one changes
+/// nothing.
+#[test]
+fn refs_longer_than_the_cap_are_rejected_and_change_nothing() {
+    let env = Env::default();
+    let l = setup_lending(&env);
+    let max = crate::MAX_REF_LEN as usize;
+    let id = l.f.mint(&env, "DEP-1");
+
+    let lock = |r: &String| l.f.client.try_lock(&id, &l.lender, &2_000, r, &DUE, &GRACE);
+    assert_eq!(lock(&text(&env, max + 1)), Err(Ok(Error::RefTooLong)));
+    assert_eq!(l.f.client.get_receipt(&id).status, Status::Active);
+    assert_eq!(lock(&text(&env, max)), Ok(Ok(id)));
+
+    l.default_and_recover(&env, id);
+    let buyer = Address::generate(&env);
+    assert_eq!(
+        l.f.client
+            .try_complete_recovery(&id, &l.operator, &buyer, &text(&env, max + 1)),
+        Err(Ok(Error::RefTooLong))
+    );
+    assert_eq!(l.f.client.get_receipt(&id).status, Status::Recovery);
+    let sale =
+        l.f.client
+            .complete_recovery(&id, &l.operator, &buyer, &text(&env, max));
+
+    assert_eq!(
+        l.f.client
+            .try_record_settlement(&sale, &l.operator, &text(&env, max + 1)),
+        Err(Ok(Error::RefTooLong))
+    );
+    assert_eq!(l.f.client.get_sale(&sale).settlement_ref, None);
+    l.f.client
+        .record_settlement(&sale, &l.operator, &text(&env, max));
+    assert_eq!(
+        l.f.client.get_sale(&sale).settlement_ref,
+        Some(text(&env, max))
+    );
 }

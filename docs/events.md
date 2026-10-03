@@ -36,12 +36,22 @@ receipt's book weight after any split in the same transaction.
 ### Ordering within one transaction
 
 A partial `exit`, `lock` or `unlock` emits **`split` first**, then the
-operation's own event. The operation's event names the **taken** child
-(`split.taken_id`). The remainder (`split.remainder_id`) keeps the parent's
-status, owner and pledge. Apply the events in emission order.
+operation's own event. A split happens **in place**: the parent keeps its id
+and becomes the remainder (`split.remainder_id == split.parent_id`), with its
+status, owner and pledge unchanged and its weight and bag count reduced. The
+operation's event names the **taken** receipt (`split.taken_id`), which is
+new. Apply the events in emission order.
 
-`extend_ttl_batch` emits one `ttl_extended` per receipt, in the order the ids
-were given.
+**Archive every `split` event.** Because the parent is reduced in place, the
+chain stores only a receipt's current weight. Its earlier weights exist only
+in these events, and RPC keeps events for about 7 days, so the indexer's
+own archive is the permanent record. The same is true of `exited` and
+`revoked`: finished receipts are no longer kept alive (see
+`docs/archival.md`), so their state is restored only on demand.
+
+`extend_ttl_batch` emits one `ttl_extended` per receipt it keeps alive, in
+the order the ids were given. `Exited` and `Revoked` receipts are skipped and
+emit nothing.
 
 ## Receipt lifecycle
 
@@ -63,34 +73,34 @@ were given.
 | verifier | | Address | co-signer |
 | deposit_date | | u64 | timestamp |
 
-### `split`: parent becomes Split, two children are created (inside a partial `exit` / `lock` / `unlock`)
+### `split`: the parent is reduced in place and one receipt is created (inside a partial `exit` / `lock` / `unlock`)
 
 | field | T | type | notes |
 |---|---|---|---|
-| parent_id | T | u64 | now `Split`, never changes again |
-| owner | | Address | inherited by both children |
-| warehouse_id | | Symbol | inherited by both children |
-| status | | Status | parent's status before the split, inherited by both children |
-| lender | | Option<Address> | the parent's pledge, if it was `Locked` / `Recovery`; inherited by both children |
-| parent_weight_kg | | u64 | = taken + remainder |
-| taken_id | | u64 | the child the operation acts on |
+| parent_id | T | u64 | keeps its id, status and pledge, and becomes the remainder |
+| owner | | Address | inherited by the new receipt |
+| warehouse_id | | Symbol | inherited by the new receipt |
+| status | | Status | the parent's status, unchanged; the new receipt starts with it too |
+| lender | | Option<Address> | the parent's pledge, if it was `Locked` / `Recovery`; the new receipt starts with it too |
+| parent_weight_kg | | u64 | the parent's weight **before** the split, = taken + remainder |
+| taken_id | | u64 | the new receipt, which the operation acts on; its `parent_id` is `parent_id` |
 | taken_weight_kg | | u64 | |
 | taken_bag_count | | u32 | |
-| remainder_id | | u64 | the child left as it was |
-| remainder_weight_kg | | u64 | |
+| remainder_id | | u64 | always equal to `parent_id` |
+| remainder_weight_kg | | u64 | the parent's weight after the split |
 | remainder_bag_count | | u32 | |
 | split_at | | u64 | timestamp |
 
-The children also inherit `deposit_id`, `commodity`, `grade`,
+The new receipt also inherits `deposit_id`, `commodity`, `grade`,
 `weight_source`, `moisture_pct`, `custodian`, `verifier`, `deposit_date`, the
 lock terms and recovery history, which the indexer already holds for the
-parent. Taken and remainder bag counts sum to the parent's.
+parent. Taken and remainder bag counts sum to the parent's before the split.
 
 ### `exited`: Active becomes Exited (`exit`)
 
 | field | T | type | notes |
 |---|---|---|---|
-| receipt_id | T | u64 | the whole receipt, or the taken child of a partial exit |
+| receipt_id | T | u64 | the whole receipt, or the new receipt split off by a partial exit |
 | warehouse_id | T | Symbol | |
 | owner | | Address | |
 | custodian | | Address | who signed the release |
@@ -131,7 +141,7 @@ rent was paid. `extend_index_ttl` emits nothing.
 
 | field | T | type | notes |
 |---|---|---|---|
-| receipt_id | T | u64 | the whole receipt, or the taken child of a partial lock |
+| receipt_id | T | u64 | the whole receipt, or the new receipt split off by a partial lock |
 | lender | T | Address | |
 | owner | | Address | |
 | warehouse_id | | Symbol | |
@@ -145,14 +155,14 @@ rent was paid. `extend_index_ttl` emits nothing.
 
 | field | T | type | notes |
 |---|---|---|---|
-| receipt_id | T | u64 | the released receipt (taken child if partial) |
+| receipt_id | T | u64 | the released receipt (on a partial unlock, the new receipt split off) |
 | lender | T | Address | |
 | owner | | Address | released grain always goes to the owner |
 | warehouse_id | | Symbol | |
 | loan_ref | | String | |
 | kg | | u64 | released quantity |
 | partial | | bool | |
-| remaining_receipt_id | | Option<u64> | still pledged, if partial |
+| remaining_receipt_id | | Option<u64> | if partial: the original receipt, still pledged with the rest |
 | from_recovery | | bool | true: the open recovery is recorded as `Repaid` |
 | unlocked_at | | u64 | timestamp |
 
@@ -244,19 +254,19 @@ Each event has its subject as a topic and a timestamp in the data.
 |---|---|---|
 | (none) → Active | `mint` | `minted` |
 | Active → Exited | `exit` (full) | `exited` |
-| Active → Split + Exited child + Active child | `exit` (partial) | `split`, `exited` |
+| Active (reduced) + new Exited receipt | `exit` (partial) | `split`, `exited` |
 | Active → Revoked | `revoke` | `revoked` |
 | Active → Locked | `lock` (full) | `locked` |
-| Active → Split + Locked child + Active child | `lock` (partial) | `split`, `locked` |
+| Active (reduced) + new Locked receipt | `lock` (partial) | `split`, `locked` |
 | Locked → Active | `unlock` (full) | `unlocked` (`from_recovery = false`) |
-| Locked → Split + Active child + Locked child | `unlock` (partial) | `split`, `unlocked` (`partial = true`) |
+| Locked (reduced) + new Active receipt | `unlock` (partial) | `split`, `unlocked` (`partial = true`) |
 | Locked → Locked | `extend_due` | `due_extended` |
 | Locked → Recovery | `start_recovery` | `recovery_started` |
 | Recovery → Active | `unlock` (full) | `unlocked` (`from_recovery = true`) |
-| Recovery → Split + Active child + Recovery child | `unlock` (partial) | `split`, `unlocked` (`from_recovery = true`) |
+| Recovery (reduced) + new Active receipt | `unlock` (partial) | `split`, `unlocked` (`from_recovery = true`) |
 | Recovery → Active (new owner); Sale created | `complete_recovery` | `recovery_completed` |
 | Sale unsettled → settled | `record_settlement` | `settlement_recorded` |
-| (none) | `extend_ttl`, `extend_ttl_batch` | `ttl_extended` × n |
+| (none) | `extend_ttl`, `extend_ttl_batch` | `ttl_extended` × n, none for `Exited` / `Revoked` |
 | (none) | `extend_index_ttl` | (none) |
 | registry changes | `add_*` / `remove_*` | the matching registry event |
 

@@ -28,6 +28,9 @@ pub enum Error {
     InvalidMoisture = 15,
     /// Recorded exit weight was zero.
     InvalidExitWeight = 16,
+    /// A stored record holds a code no layout defines. Only reachable if
+    /// storage was written by something other than this contract.
+    CorruptRecord = 17,
 
     // --- registries ---
     WarehouseNotRegistered = 20,
@@ -54,6 +57,8 @@ pub enum Error {
     LenderIsOwner = 36,
     /// No sale with this `sale_id` — the recovery was never completed.
     SaleNotFound = 37,
+    /// `loan_ref`, `sale_ref` or `settlement_ref` longer than `MAX_REF_LEN`.
+    RefTooLong = 38,
 
     // --- operations ---
     /// A batched keep-alive call named more entries than `MAX_TTL_BATCH`.

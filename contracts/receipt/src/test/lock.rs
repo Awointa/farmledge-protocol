@@ -1,6 +1,6 @@
 use soroban_sdk::{testutils::Address as _, Address, Env, IntoVal, String};
 
-use super::{live_weight, next_id, setup_lending, sign_only, Lending, DUE, GRACE, LOAN_REF, NOW};
+use super::{next_id, setup_lending, sign_only, total_weight, Lending, DUE, GRACE, LOAN_REF, NOW};
 use crate::{Error, Lock, MaybeLock, Status};
 
 fn lock_args(env: &Env, l: &Lending, id: u64, kg: u64) -> soroban_sdk::Vec<soroban_sdk::Val> {
@@ -152,23 +152,28 @@ fn full_lock_pledges_the_receipt_in_place() {
 }
 
 #[test]
-fn partial_lock_splits_and_leaves_the_remainder_active_under_the_owner() {
+fn partial_lock_splits_in_place_and_leaves_the_remainder_active_under_the_owner() {
     let env = Env::default();
     let l = setup_lending(&env);
     let parent = l.f.mint(&env, "DEP-1");
 
     let locked_id = l.lock(&env, parent, 600);
     let locked = l.f.client.get_receipt(&locked_id);
-    let remainder = l.f.client.get_receipt(&(locked_id + 1));
+    let remainder = l.f.client.get_receipt(&parent);
 
-    assert_eq!(l.f.client.get_receipt(&parent).status, Status::Split);
+    assert_eq!(
+        locked_id,
+        parent + 1,
+        "the pledged portion is the new receipt"
+    );
+    assert_eq!(locked.parent_id, Some(parent));
     assert_eq!(locked.weight_kg, 600);
     assert_eq!(locked.status, Status::Locked);
     assert_eq!(remainder.weight_kg, 1_400);
     assert_eq!(remainder.status, Status::Active);
     assert_eq!(remainder.lock, MaybeLock::None);
     assert_eq!(remainder.owner, l.f.farmer);
-    assert_eq!(live_weight(&l.f, next_id(&l.f) - 1), 2_000);
+    assert_eq!(total_weight(&l.f, next_id(&l.f) - 1), 2_000);
 }
 
 #[test]
@@ -219,7 +224,7 @@ fn lock_on_a_bag_estimate_receipt_fails_and_on_a_scale_receipt_succeeds() {
 }
 
 #[test]
-fn lock_rejects_exited_revoked_and_split_receipts() {
+fn lock_rejects_exited_and_revoked_receipts_and_more_than_remains() {
     let env = Env::default();
     let l = setup_lending(&env);
 
@@ -235,9 +240,16 @@ fn lock_rejects_exited_revoked_and_split_receipts() {
         Err(Error::InvalidStatus)
     );
 
+    // After a partial exit: the exited portion is out, and the parent can be
+    // pledged for what it still holds and no more.
     let parent = l.f.mint(&env, "DEP-SPLIT");
-    l.f.client.exit(&parent, &l.f.custodian, &500, &500);
-    assert_eq!(try_lock(&env, &l, parent, 1_000), Err(Error::InvalidStatus));
+    let gone = l.f.client.exit(&parent, &l.f.custodian, &500, &500);
+    assert_eq!(try_lock(&env, &l, gone, 500), Err(Error::InvalidStatus));
+    assert_eq!(
+        try_lock(&env, &l, parent, 2_000),
+        Err(Error::InvalidSplitAmount)
+    );
+    assert_eq!(try_lock(&env, &l, parent, 1_500), Ok(parent));
 }
 
 #[test]
@@ -338,19 +350,25 @@ fn is_pledgeable_reflects_status_and_weight_source() {
 }
 
 #[test]
-fn get_lock_is_not_locked_for_a_free_or_split_receipt() {
+fn get_lock_is_not_locked_for_a_free_or_released_receipt() {
     let env = Env::default();
     let l = setup_lending(&env);
     let id = l.f.mint(&env, "DEP-1");
 
     assert_eq!(l.f.client.try_get_lock(&id), Err(Ok(Error::NotLocked)));
 
-    // A locked receipt that is then partly released is retired as `Split`
-    // still carrying its old lock. That is history, not a live pledge.
+    // Partly released: the released portion is free, and the original is
+    // still pledged on the same terms.
     l.lock(&env, id, 2_000);
-    l.f.client.unlock(&id, &500);
-    assert_eq!(l.f.client.get_receipt(&id).status, Status::Split);
-    assert_eq!(l.f.client.try_get_lock(&id), Err(Ok(Error::NotLocked)));
+    let released = l.f.client.unlock(&id, &500);
+    assert_eq!(
+        l.f.client.try_get_lock(&released),
+        Err(Ok(Error::NotLocked))
+    );
+    assert_eq!(
+        l.f.client.get_lock(&id).loan_ref,
+        String::from_str(&env, LOAN_REF)
+    );
 }
 
 #[test]
@@ -362,10 +380,11 @@ fn locked_receipts_are_indexed_under_the_lender() {
 
     let locked_a = l.lock(&env, a, 2_000);
     let locked_b = l.lock(&env, b, 800);
-    // Partially releasing b's pledge splits it; the part that stays locked is
-    // a new receipt and must show up under the lender too.
+    // Partially releasing b's pledge splits it: b keeps the locked part and
+    // the released part is a new receipt, which shows up under the lender
+    // too, since it was pledged when it was split off.
     let released = l.f.client.unlock(&locked_b, &300);
-    let still_locked = released + 1;
+    let still_locked = locked_b;
 
     assert_eq!(l.f.client.lender_page_count(&l.lender), 1);
     let ids: std::vec::Vec<u64> =
@@ -437,7 +456,7 @@ fn partial_lock_emits_split_then_locked() {
         taken_id: locked,
         taken_weight_kg: 600,
         taken_bag_count: 6,
-        remainder_id: locked + 1,
+        remainder_id: parent,
         remainder_weight_kg: 1_400,
         remainder_bag_count: 14,
         split_at: env.ledger().timestamp(),

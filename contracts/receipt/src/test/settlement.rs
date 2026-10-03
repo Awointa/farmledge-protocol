@@ -242,16 +242,16 @@ fn unsettled_sales_are_listed_until_settled() {
 /// The reason settlement lives on the `Sale` rather than the receipt: the
 /// buyer may split the receipt before the bank settles.
 #[test]
-fn a_settlement_recorded_after_the_buyer_splits_reaches_every_child() {
+fn a_settlement_recorded_after_the_buyer_splits_reaches_every_receipt() {
     let env = Env::default();
     let l = setup_lending(&env);
     let (id, sale_id, _) = sold(&env, &l, "DEP-1");
 
+    // The sold receipt keeps the remainder; the exited part is new.
     let exited = l.f.client.exit(&id, &l.f.custodian, &500, &495);
-    let remainder = exited + 1;
     try_settle(&env, &l, sale_id, &l.operator, "SETTLE-1").unwrap();
 
-    for child in [exited, remainder] {
+    for child in [exited, id] {
         let record =
             l.f.client
                 .get_receipt(&child)

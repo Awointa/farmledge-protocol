@@ -2,12 +2,12 @@
 //! state-changing call — valid or not, in any order, against any receipt or
 //! sale including retired and terminal ones — and after **every** step:
 //!
-//! 1. **Weight is conserved.** The non-`Split` receipts of each deposit sum to
-//!    what was minted for it, and every split parent is covered exactly by
-//!    its two children.
+//! 1. **Weight is conserved.** The receipts of each deposit sum to what was
+//!    minted for it, a receipt's weight never grows, and every receipt split
+//!    off names an earlier receipt of the same deposit.
 //! 2. **A receipt is in exactly one state.** Its `status` agrees with its
-//!    `lock`, `recovery` and exit fields; a `Split` parent is frozen at the
-//!    moment it was split; nothing ever leaves a terminal status.
+//!    `lock`, `recovery` and exit fields, and an `Exited` or `Revoked`
+//!    receipt never changes again.
 //! 3. **A settlement is written once.** Once a sale's `settlement_ref` is set
 //!    it never changes, and a second `record_settlement` fails.
 //! 4. **Split lineage resolves to one sale.** Every completed recovery in a
@@ -28,7 +28,7 @@ use soroban_sdk::{
     Address, Env, String,
 };
 
-use super::{next_id, prop_split::assert_each_parent_is_covered_by_its_children, setup_lending};
+use super::{next_id, setup_lending};
 use crate::{MaybeLock, MaybeRecovery, Receipt, RecoveryResolution, Sale, Status};
 
 /// Which receipt an operation acts on. Most of the time it is one whose
@@ -104,7 +104,7 @@ fn op() -> impl Strategy<Value = Op> {
     ]
 }
 
-/// Every stored receipt, split parents included, by id.
+/// Every stored receipt, by id.
 fn receipts(l: &super::Lending) -> BTreeMap<u64, Receipt> {
     (1..next_id(&l.f))
         .map(|id| (id, l.f.client.get_receipt(&id)))
@@ -123,7 +123,7 @@ fn sales(l: &super::Lending) -> BTreeMap<u64, Sale> {
 }
 
 fn is_terminal(status: &Status) -> bool {
-    matches!(status, Status::Split | Status::Exited | Status::Revoked)
+    matches!(status, Status::Exited | Status::Revoked)
 }
 
 /// Invariant 2, for one receipt on its own.
@@ -165,10 +165,6 @@ fn check_single_state(r: &Receipt) -> Result<(), TestCaseError> {
                 id
             );
         }
-        // A split parent keeps whatever it had when it was divided; its
-        // children carry that state forward. Frozen-ness is checked across
-        // steps instead.
-        Status::Split => prop_assert!(!exited, "Split {} has exit data", id),
     }
     for past in r.recovery_history.iter() {
         prop_assert!(
@@ -185,6 +181,23 @@ fn descends_from(all: &BTreeMap<u64, Receipt>, mut id: u64, ancestor: u64) -> bo
     loop {
         if id == ancestor {
             return true;
+        }
+        match all.get(&id).and_then(|r| r.parent_id) {
+            Some(parent) => id = parent,
+            None => return false,
+        }
+    }
+}
+
+/// `id` is `ancestor`, or was split off it (directly or through other
+/// receipts) by splits that all allocated ids at or after `since`.
+fn split_off_since(all: &BTreeMap<u64, Receipt>, mut id: u64, ancestor: u64, since: u64) -> bool {
+    loop {
+        if id == ancestor {
+            return true;
+        }
+        if id < since {
+            return false;
         }
         match all.get(&id).and_then(|r| r.parent_id) {
             Some(parent) => id = parent,
@@ -220,8 +233,11 @@ proptest! {
         let mut deposits = 1u32;
 
         // State that must never change once reached.
-        let mut frozen: BTreeMap<u64, Receipt> = BTreeMap::new();
         let mut settled: BTreeMap<u64, Option<String>> = BTreeMap::new();
+        // sale id -> first receipt id allocated after the sale, so the
+        // receipts split off the sold one *before* the sale (a partial
+        // unlock during recovery, say) are not counted as sold.
+        let mut sold_after: BTreeMap<u64, u64> = BTreeMap::new();
 
         for op in ops {
             let before = (receipts(&l), sales(&l));
@@ -287,10 +303,13 @@ proptest! {
                         .is_err()
                 }
                 Op::CompleteRecovery { target, buyer } => {
-                    l.f.client
-                        .try_complete_recovery(&pick_from(*target, &[Status::Recovery]), &l.operator, &buyers[*buyer],
-                                               &text("SALE"))
-                        .is_err()
+                    let res = l.f.client.try_complete_recovery(
+                        &pick_from(*target, &[Status::Recovery]), &l.operator, &buyers[*buyer],
+                        &text("SALE"));
+                    if let Ok(Ok(sale_id)) = res {
+                        sold_after.insert(sale_id, next_id(&l.f));
+                    }
+                    res.is_err()
                 }
                 Op::Settle { sale } => {
                     if sale_ids.is_empty() {
@@ -319,27 +338,31 @@ proptest! {
             }
             let (all, all_sales) = after;
 
-            // 1. Weight conserved, per deposit and per split.
-            let mut live: BTreeMap<u64, u64> = BTreeMap::new();
-            for r in all.values().filter(|r| r.status != Status::Split) {
+            // 1. Weight conserved, per deposit; weights only shrink; lineage
+            //    stays within a deposit.
+            let mut total: BTreeMap<u64, u64> = BTreeMap::new();
+            for r in all.values() {
                 prop_assert!(r.weight_kg > 0, "receipt {} has no weight", r.receipt_id);
-                *live.entry(root_of(&all, r.receipt_id)).or_default() += r.weight_kg;
+                *total.entry(root_of(&all, r.receipt_id)).or_default() += r.weight_kg;
+                if let Some(parent_id) = r.parent_id {
+                    prop_assert!(parent_id < r.receipt_id, "{} predates its parent", r.receipt_id);
+                    prop_assert_eq!(&all[&parent_id].deposit_id, &r.deposit_id);
+                }
+                if let Some(prev) = before.0.get(&r.receipt_id) {
+                    prop_assert!(r.weight_kg <= prev.weight_kg,
+                        "{} grew after {:?}", r.receipt_id, op);
+                }
             }
-            prop_assert_eq!(&live, &minted, "weight changed after {:?}", op);
-            assert_each_parent_is_covered_by_its_children(&l.f, next_id(&l.f) - 1)?;
+            prop_assert_eq!(&total, &minted, "weight changed after {:?}", op);
 
-            // 2. Exactly one state, and terminal states are final.
+            // 2. Exactly one state, and terminal receipts are frozen.
             for r in all.values() {
                 check_single_state(r)?;
                 if let Some(prev) = before.0.get(&r.receipt_id) {
                     if is_terminal(&prev.status) {
-                        prop_assert_eq!(&prev.status, &r.status,
-                            "{} left terminal status after {:?}", r.receipt_id, op);
+                        prop_assert_eq!(prev, r,
+                            "terminal {} changed after {:?}", r.receipt_id, op);
                     }
-                }
-                if r.status == Status::Split {
-                    let snapshot = frozen.entry(r.receipt_id).or_insert_with(|| r.clone());
-                    prop_assert_eq!(&*snapshot, r, "split parent {} changed", r.receipt_id);
                 }
             }
 
@@ -375,16 +398,17 @@ proptest! {
                     prop_assert!(r.weight_kg <= sale.weight_kg);
                 }
             }
-            // ...and a sold receipt's descendants account for exactly what
-            // was sold, so a sale's grain is never claimed twice.
-            for sale in all_sales.values() {
-                let sold_leaves: u64 = all
+            // ...and the sold receipt plus everything split off it since the
+            // sale account for exactly what was sold, so a sale's grain is
+            // never claimed twice.
+            for (sale_id, sale) in &all_sales {
+                let watermark = sold_after[sale_id];
+                let sold: u64 = all
                     .values()
-                    .filter(|r| r.status != Status::Split)
-                    .filter(|r| descends_from(&all, r.receipt_id, sale.receipt_id))
+                    .filter(|r| split_off_since(&all, r.receipt_id, sale.receipt_id, watermark))
                     .map(|r| r.weight_kg)
                     .sum();
-                prop_assert_eq!(sold_leaves, sale.weight_kg);
+                prop_assert_eq!(sold, sale.weight_kg, "sale {} over- or under-claimed", sale_id);
             }
         }
     }

@@ -312,14 +312,17 @@ def main():
                   lender=ids["lender"], kg=1500, loan_ref="LOAN-M2",
                   due_date=due, grace_period=0))
     size("Receipt — Locked", receipt_key(locked))
-    size("Receipt — Active, split child", receipt_key(part + 1))
-    op("exit — full", ids["farmer"], "exit", receipt_id=part + 1,
+    # A split happens in place: r2 keeps the unpledged 500kg under its own
+    # id, and `part` is the new, pledged receipt.
+    size("Receipt — Active, reduced in place by a split", receipt_key(r2))
+    op("exit — full", ids["farmer"], "exit", receipt_id=r2,
        custodian=ids["custodian"], kg=500, exit_weight_kg=495)
-    op("exit — partial (splits)", ids["farmer"], "exit", receipt_id=r3,
-       custodian=ids["custodian"], kg=600, exit_weight_kg=598)
+    gone = int(op("exit — partial (splits)", ids["farmer"], "exit", receipt_id=r3,
+                  custodian=ids["custodian"], kg=600, exit_weight_kg=598))
+    op("extend_ttl_batch — 2 Exited receipts (skipped)", ids["buyer"],
+       "extend_ttl_batch", receipt_ids=json.dumps([r2, gone]))
     op("extend_due", ids["lender"], "extend_due", receipt_id=part, new_due_date=due + 1)
-    released = int(op("unlock — partial (splits)", ids["lender"], "unlock",
-                      receipt_id=part, kg=500))
+    op("unlock — partial (splits)", ids["lender"], "unlock", receipt_id=part, kg=500)
 
     op("extend_ttl — 1 receipt, TTL above threshold (no-op bump)", ids["buyer"],
        "extend_ttl", receipt_id=r3)
@@ -361,8 +364,8 @@ def main():
     op("record_settlement", ids["lender"], "record_settlement", sale_id=sale,
        operator=ids["operator"], settlement_ref="PAY-M1")
     size("Sale — settled", scval_key("Sale", {"u64": str(sale)}))
-    # The partial unlock left 1,000kg still pledged in the remainder child.
-    op("unlock — full", ids["lender"], "unlock", receipt_id=released + 1, kg=1000)
+    # The partial unlock left 1,000kg still pledged under `part` itself.
+    op("unlock — full", ids["lender"], "unlock", receipt_id=part, kg=1000)
 
     print(f"Network: {net.network}, contract `{net.c}`, run {run}.\n")
     print("| operation | fee charged (stroops) | XLM | of which rent | other resource fee "

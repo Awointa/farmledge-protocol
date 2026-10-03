@@ -22,6 +22,7 @@
 mod admin;
 mod errors;
 mod events;
+mod layout;
 mod lending;
 mod split;
 mod storage;
@@ -35,6 +36,7 @@ mod test;
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 
 pub use errors::Error;
+pub use lending::MAX_REF_LEN;
 pub use types::{
     Index, Lock, MaybeLock, MaybeRecovery, Receipt, Recovery, RecoveryResolution, Sale, Status,
     WeightSource, DATA_VERSION,
@@ -184,7 +186,9 @@ impl ReceiptContract {
     /// and the remainder stays `Active`. Only `Active` receipts can exit.
     ///
     /// Returns the id of the receipt that was retired — the receipt itself on
-    /// a full exit, or the exited child on a partial one.
+    /// a full exit, or the new receipt split off it on a partial one. On a
+    /// partial exit the original receipt keeps its id and the rest of the
+    /// weight.
     pub fn exit(
         env: Env,
         receipt_id: u64,
@@ -274,6 +278,11 @@ impl ReceiptContract {
     /// authorisation, so a keep-alive job can run unprivileged — and so can
     /// anyone else with an interest in the receipt surviving.
     ///
+    /// An `Exited` or `Revoked` receipt is skipped: nothing can act on it
+    /// again, so it is left to archive, and its history lives in the
+    /// indexer's event archive. Reading it later still works; the read
+    /// restores it.
+    ///
     /// Also bumps the receipt's `deposit_id` guard entry, keeping the
     /// duplicate-mint protection alive alongside the receipt it protects, any
     /// `Sale` records its recovery history refers to, the unsettled-sales
@@ -288,14 +297,23 @@ impl ReceiptContract {
     /// All-or-nothing: an unknown id fails the whole batch with
     /// `ReceiptNotFound`, because it means the caller's list has drifted
     /// from the chain (after a Testnet reset, say) and that should be loud.
-    /// Returns the number of receipts extended.
+    /// Returns the number of receipts extended, which excludes the `Exited`
+    /// and `Revoked` ones skipped.
+    ///
+    /// The keep-alive job should not send terminal ids at all: once one has
+    /// archived, naming it makes the transaction restore it (paying the
+    /// network's minimum TTL in rent) only for it to be skipped.
     pub fn extend_ttl_batch(env: Env, receipt_ids: Vec<u64>) -> Result<u32, Error> {
         if receipt_ids.len() > MAX_TTL_BATCH {
             return Err(Error::BatchTooLarge);
         }
         let now = env.ledger().timestamp();
+        let mut extended = 0;
         for receipt_id in receipt_ids.iter() {
             let receipt = storage::get_receipt(&env, receipt_id).ok_or(Error::ReceiptNotFound)?;
+            if matches!(receipt.status, Status::Exited | Status::Revoked) {
+                continue;
+            }
 
             storage::bump_receipt(&env, receipt_id);
             storage::bump_deposit_index(&env, &receipt.deposit_id);
@@ -316,10 +334,11 @@ impl ReceiptContract {
                 extended_at: now,
             }
             .publish(&env);
+            extended += 1;
         }
         storage::bump_if_present(&env, &storage::DataKey::UnsettledSales);
         storage::bump_instance(&env);
-        Ok(receipt_ids.len())
+        Ok(extended)
     }
 
     /// Keeps `page_count` pages of one paged index alive, starting at
@@ -366,7 +385,8 @@ impl ReceiptContract {
     /// `grace_period` is seconds after it before recovery may start.
     ///
     /// Returns the id of the locked receipt — the receipt itself on a full
-    /// lock, or the locked child on a partial one.
+    /// lock, or the new receipt split off it on a partial one, in which case
+    /// the original keeps its id and the unpledged remainder.
     pub fn lock(
         env: Env,
         receipt_id: u64,
@@ -390,8 +410,9 @@ impl ReceiptContract {
     /// Releases `kg` from a `Locked` or `Recovery` receipt back to its owner.
     /// Only the lender recorded in the lock may sign.
     ///
-    /// A partial unlock splits: the released portion is `Active`, the rest
-    /// stays `Locked` / in `Recovery` under the same lock. Unlocking from
+    /// A partial unlock splits: the released portion becomes a new `Active`
+    /// receipt, and the original keeps its id and stays `Locked` / in
+    /// `Recovery` under the same lock with the rest. Unlocking from
     /// `Recovery` records the recovery as `Repaid` in `recovery_history`.
     ///
     /// Returns the id of the released receipt.
@@ -460,8 +481,8 @@ impl ReceiptContract {
     }
 
     /// One page of receipts ever pledged to `lender`, 64 per page. Includes
-    /// released, recovered and split records; filter on `status` and `lock`
-    /// for live collateral.
+    /// released and recovered records; filter on `status` and `lock` for
+    /// live collateral.
     pub fn get_receipts_by_lender(env: Env, lender: Address, page: u32) -> Vec<Receipt> {
         let ids = storage::lender_page(&env, &lender, page);
         Self::collect(&env, ids)
@@ -530,8 +551,9 @@ impl ReceiptContract {
     ///
     /// Paged because an unpaged read would blow the network's per-transaction
     /// ledger-read limit (200 entries) once a farmer has a few hundred
-    /// receipts. Includes `Split`, `Exited` and `Revoked` records — they are
-    /// the audit trail; filter on `status` for live holdings. A receipt sold
+    /// receipts. Includes `Exited` and `Revoked` records — filter on
+    /// `status` for live holdings. Those may be archived (see
+    /// `extend_ttl_batch`); reading one restores it, at the caller's cost. A receipt sold
     /// in recovery stays listed under its previous owner too, so also filter
     /// on `owner`.
     pub fn get_receipts_by_owner(env: Env, owner: Address, page: u32) -> Vec<Receipt> {

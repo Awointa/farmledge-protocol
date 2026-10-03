@@ -67,20 +67,25 @@ Each deployment is fresh; no state is carried over between them.
 | Locked | Recovery | `start_recovery` |
 | Recovery | Active | `unlock` — farmer repaid before the sale completed |
 | Recovery | Active | `complete_recovery` — owner becomes the buyer, who then exits or pledges |
-| Active / Locked / Recovery | Split | internal only, as part of a partial `exit`, `lock` or `unlock` |
 
 Everything else is rejected with `InvalidStatus`. In particular a `Locked` or
 `Recovery` receipt can never be exited, revoked, or split by its owner. To
 void a pledged receipt (e.g. a fraudulent mint discovered mid-loan), the
 lender unlocks it first and then the admin revokes it.
 
-**Partial operations split.** `exit`, `lock` and `unlock` given less than the
-full weight divide the receipt through one internal helper (`split.rs`): the
-parent becomes `Split` and is never written again, and two children whose
-weights and bag counts sum exactly to it take its place. The portion acted on
-is the first child and its id is returned; the second keeps the parent's
-status and pledge. A locked portion and its free remainder are then fully
-independent receipts.
+**Partial operations split in place.** `exit`, `lock` and `unlock` given
+less than the full weight divide the receipt through one internal helper
+(`split.rs`). The receipt keeps its id, status and pledge, and its weight and
+bag count drop to what is left. The portion acted on becomes one new receipt
+whose `parent_id` names it, and its id is returned. A locked portion and its
+free remainder are then fully independent receipts.
+
+A receipt's weight is therefore **not fixed for life**. Across all the
+receipts of one deposit it always sums to what was minted. The chain keeps
+only current weights, and the `split` event recording each division is the
+history, so the indexer archives it (`docs/events.md`). This halves the cost
+of every partial operation compared with retiring the parent and writing two
+children (`docs/archival.md`).
 
 ## Authorisation
 
@@ -94,13 +99,13 @@ every later lending call authorises the lender **recorded in the lock**.
 | `mint` | custodian **and** verifier | custodian registered for the warehouse; verifier registered |
 | `exit` | custodian **and** owner | custodian registered for the receipt's warehouse; status `Active` |
 | `revoke` | admin | status `Active` |
-| `extend_ttl`, `extend_ttl_batch`, `extend_index_ttl` | nobody | at most `MAX_TTL_BATCH` (25) receipts or pages per call |
-| `lock` | lender **and** owner | status `Active`; `weight_source == Scale`; `lender != owner`; `due_date > now` |
+| `extend_ttl`, `extend_ttl_batch`, `extend_index_ttl` | nobody | at most `MAX_TTL_BATCH` (25) receipts or pages per call; `Exited` and `Revoked` receipts are skipped |
+| `lock` | lender **and** owner | status `Active`; `weight_source == Scale`; `lender != owner`; `due_date > now`; `loan_ref` at most `MAX_REF_LEN` (64) bytes |
 | `unlock` | recorded lender | status `Locked` or `Recovery` |
 | `extend_due` | recorded lender | status `Locked`; new date strictly later |
 | `start_recovery` | recorded lender | status `Locked`; ledger time `> due_date + grace_period` |
-| `complete_recovery` | recovery operator **and** recorded lender | operator registered; status `Recovery` |
-| `record_settlement` | recovery operator **and** the sale's lender | operator registered (any, not only the one who sold); sale exists; settlement not yet recorded |
+| `complete_recovery` | recovery operator **and** recorded lender | operator registered; status `Recovery`; `sale_ref` at most 64 bytes |
+| `record_settlement` | recovery operator **and** the sale's lender | operator registered (any, not only the one who sold); sale exists; settlement not yet recorded; `settlement_ref` at most 64 bytes |
 | registry add/remove | admin | — |
 
 Lenders are not registered: any address can lend. Recovery operators are.
@@ -129,12 +134,12 @@ Where each lives:
 - When it resolves — `Repaid` (lender unlocked) or `Completed` (sold) — it is
   appended to `Receipt::recovery_history`. That list is append-only: a buyer
   can pledge the receipt again and a later recovery never overwrites the
-  earlier record. Split children inherit it.
+  earlier record. A receipt split off another inherits it.
 - A completed recovery also creates one canonical **`Sale`** record, stored
   under its `sale_id`, and the history entry points at it. The settlement is
   written to the `Sale`, not the receipt, because by the time the bank
   settles the buyer may already have split or exited the receipt — every
-  child's history still resolves to the same, settled sale. Keying by
+  receipt's history still resolves to the same, settled sale. Keying by
   `sale_id` rather than `receipt_id` also keeps two sales of the same receipt
   apart.
 - `get_unsettled_sales(page)` / `unsettled_sale_count()` list completed sales
@@ -142,8 +147,15 @@ Where each lives:
 - `extend_ttl(receipt_id)` also keeps alive every `Sale` the receipt's
   history refers to.
 
-Audit state lives in storage. Events are for the indexer and expire from RPC
-after about a week.
+Current state lives in storage. Events are for the indexer and expire from
+RPC after about a week. The indexer's event archive is the permanent history:
+a receipt's earlier weights exist only in `split` events, and `Exited` and
+`Revoked` receipts are no longer kept alive, so they archive. They stay
+restorable, and reading one restores it.
+
+Receipts and sales are stored in a compact positional layout
+(`layout.rs`), not as named-field maps, which more than halves their size and
+rent. Reads return the same `Receipt` and `Sale` types as before.
 
 ## Events
 
@@ -168,7 +180,7 @@ ledger-read limit, and each has a page count:
 
 Single records: `get_receipt`, `get_sale`, `get_lock`, `is_pledgeable`,
 `data_version`. Indexes are append-only audit
-trails: they include split, exited, released and sold receipts, so filter on
+trails: they include exited, released and sold receipts, so filter on
 `status` (and on `owner` / `lock` where it matters). A receipt sold in
 recovery is listed under both the farmer and the buyer; a receipt re-pledged
 to the same lender after a full unlock appears twice in that lender's index.
@@ -180,7 +192,8 @@ warehouse ids, loan and sale references. Names, phone numbers, farmer
 consent records and loan terms stay off-chain in `farmledge-app` and the
 lenders' own systems. Anything written here is public and permanent, so
 references such as `loan_ref`, `sale_ref` and `settlement_ref` must be
-opaque identifiers, never personal data.
+opaque identifiers, never personal data. Each is capped at 64 bytes
+(`MAX_REF_LEN`), which fits a UUID, a bank reference or a hex SHA-256.
 
 ## Prerequisites
 

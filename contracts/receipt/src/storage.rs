@@ -1,5 +1,6 @@
 use soroban_sdk::{contracttype, Address, Env, String, Symbol, Vec};
 
+use crate::layout::{self, StoredReceipt, StoredSale};
 use crate::types::{Index, Receipt, Sale};
 
 /// ~5s per ledger.
@@ -94,15 +95,20 @@ pub fn bump_if_present(env: &Env, key: &DataKey) {
 
 // --- receipts --------------------------------------------------------------
 
+/// Receipts and sales are stored in the compact layout in `layout.rs`,
+/// and converted at this boundary only.
 pub fn get_receipt(env: &Env, receipt_id: u64) -> Option<Receipt> {
     env.storage()
         .persistent()
-        .get(&DataKey::Receipt(receipt_id))
+        .get::<_, StoredReceipt>(&DataKey::Receipt(receipt_id))
+        .map(|stored| layout::load_receipt(env, receipt_id, stored))
 }
 
 pub fn set_receipt(env: &Env, receipt: &Receipt) {
     let key = DataKey::Receipt(receipt.receipt_id);
-    env.storage().persistent().set(&key, receipt);
+    env.storage()
+        .persistent()
+        .set(&key, &layout::store_receipt(env, receipt));
     bump(env, &key);
 }
 
@@ -141,12 +147,17 @@ pub fn next_sale_id(env: &Env) -> u64 {
 }
 
 pub fn get_sale(env: &Env, sale_id: u64) -> Option<Sale> {
-    env.storage().persistent().get(&DataKey::Sale(sale_id))
+    env.storage()
+        .persistent()
+        .get::<_, StoredSale>(&DataKey::Sale(sale_id))
+        .map(|stored| layout::load_sale(sale_id, stored))
 }
 
 pub fn set_sale(env: &Env, sale: &Sale) {
     let key = DataKey::Sale(sale.sale_id);
-    env.storage().persistent().set(&key, sale);
+    env.storage()
+        .persistent()
+        .set(&key, &layout::store_sale(sale));
     bump(env, &key);
 }
 
@@ -187,9 +198,9 @@ pub fn remove_unsettled_sale(env: &Env, sale_id: u64) {
 
 /// Append `id` (a receipt id, or a sale id for the lender-sale index) to the
 /// last page, starting a new page when the current one is full. Pages are
-/// append-only: a receipt is never removed from an index, because `Split`,
-/// `Exited` and `Revoked` receipts stay readable as audit records. Callers
-/// filter by `status`.
+/// append-only: a receipt is never removed from an index, because `Exited`
+/// and `Revoked` receipts stay readable (restored on read once archived).
+/// Callers filter by `status`.
 ///
 /// A full page is never written again, so nothing here keeps it alive past
 /// `ENTRY_TTL_EXTEND_TO`; `extend_index_ttl` exists for that.
@@ -236,7 +247,8 @@ pub fn index_warehouse(env: &Env, warehouse_id: &Symbol, receipt_id: u64) {
     );
 }
 
-/// Every receipt ever pledged to `lender`, including a locked split child.
+/// Every receipt ever pledged to `lender`, including one split off a pledged
+/// receipt.
 /// A receipt re-pledged to the same lender after a full unlock appears twice;
 /// readers filter on `status` and `lock`.
 pub fn index_lender(env: &Env, lender: &Address, receipt_id: u64) {

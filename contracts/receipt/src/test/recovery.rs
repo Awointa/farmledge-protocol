@@ -404,8 +404,8 @@ fn the_buyer_can_pledge_again_and_the_sale_record_survives_later_locks() {
     assert_eq!(second.resolution, RecoveryResolution::Repaid);
     assert_eq!(second.lender, lender2);
 
-    // The unpledged remainder carries the sale record too.
-    let remainder = l.f.client.get_receipt(&(relocked + 1));
+    // The unpledged remainder, the original receipt, keeps the sale record.
+    let remainder = l.f.client.get_receipt(&id);
     assert_eq!(remainder.recovery_history.len(), 1);
     assert_eq!(remainder.recovery_history.get(0).unwrap(), sale);
 }
@@ -471,8 +471,9 @@ fn partial_unlock_during_recovery_keeps_the_rest_in_recovery() {
     l.default_and_recover(&env, id);
 
     let released = l.f.client.unlock(&id, &800);
-    let rest = l.f.client.get_receipt(&(released + 1));
+    let rest = l.f.client.get_receipt(&id);
     let released = l.f.client.get_receipt(&released);
+    assert_eq!(released.parent_id, Some(id));
 
     assert_eq!(released.status, Status::Active);
     assert_eq!(released.owner, l.f.farmer);

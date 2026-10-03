@@ -3,7 +3,7 @@ use soroban_sdk::{
     Address, Env, IntoVal, String,
 };
 
-use super::{live_weight, next_id, setup_lending, sign_only, DUE, GRACE, NOW};
+use super::{next_id, setup_lending, sign_only, total_weight, DUE, GRACE, NOW};
 use crate::{Error, MaybeLock, MaybeRecovery, Status};
 
 // --- authorisation ---------------------------------------------------------
@@ -128,11 +128,18 @@ fn partial_unlock_releases_a_portion_and_keeps_the_rest_locked() {
     let l = setup_lending(&env);
     let id = l.f.mint(&env, "DEP-1");
     l.lock(&env, id, 2_000);
+    let terms = l.f.client.get_lock(&id);
 
     let released_id = l.f.client.unlock(&id, &700);
     let released = l.f.client.get_receipt(&released_id);
-    let remaining = l.f.client.get_receipt(&(released_id + 1));
+    let remaining = l.f.client.get_receipt(&id);
 
+    assert_eq!(
+        released_id,
+        id + 1,
+        "the released portion is the new receipt"
+    );
+    assert_eq!(released.parent_id, Some(id));
     assert_eq!(released.weight_kg, 700);
     assert_eq!(released.status, Status::Active);
     assert_eq!(released.lock, MaybeLock::None);
@@ -141,8 +148,8 @@ fn partial_unlock_releases_a_portion_and_keeps_the_rest_locked() {
     assert_eq!(remaining.weight_kg, 1_300);
     assert_eq!(remaining.status, Status::Locked);
     assert_eq!(
-        l.f.client.get_lock(&remaining.receipt_id),
-        l.f.client.get_receipt(&id).lock.unwrap_lock(),
+        remaining.lock.unwrap_lock(),
+        terms,
         "the remaining portion keeps the original terms"
     );
 }
@@ -211,7 +218,7 @@ fn unlocked_event_marks_a_partial_release() {
         taken_id: released,
         taken_weight_kg: 700,
         taken_bag_count: 7,
-        remainder_id: released + 1,
+        remainder_id: id,
         remainder_weight_kg: 1_300,
         remainder_bag_count: 13,
         split_at: env.ledger().timestamp(),
@@ -224,7 +231,7 @@ fn unlocked_event_marks_a_partial_release() {
         loan_ref: String::from_str(&env, super::LOAN_REF),
         kg: 700,
         partial: true,
-        remaining_receipt_id: Some(released + 1),
+        remaining_receipt_id: Some(id),
         from_recovery: false,
         unlocked_at: NOW,
     };
@@ -273,17 +280,19 @@ fn partial_lock_then_partial_unlock_then_partial_lock_conserves_weight() {
     let l = setup_lending(&env);
     let root = l.f.mint(&env, "DEP-1"); // 2,000kg
 
-    let locked = l.lock(&env, root, 1_200);
-    let free_a = locked + 1; // 800 free
-    assert_eq!(live_weight(&l.f, next_id(&l.f) - 1), 2_000);
+    // Each step splits in place: the receipt acted on keeps the rest, and
+    // the portion acted on is the new receipt.
+    let locked = l.lock(&env, root, 1_200); // 1,200 locked
+    let free_a = root; // 800 free
+    assert_eq!(total_weight(&l.f, next_id(&l.f) - 1), 2_000);
 
-    let released = l.f.client.unlock(&locked, &500);
-    let still_locked = released + 1; // 700 locked
-    assert_eq!(live_weight(&l.f, next_id(&l.f) - 1), 2_000);
+    let released = l.f.client.unlock(&locked, &500); // 500 free
+    let still_locked = locked; // 700 locked
+    assert_eq!(total_weight(&l.f, next_id(&l.f) - 1), 2_000);
 
-    let relocked = l.lock(&env, released, 200);
-    let free_b = relocked + 1; // 300 free
-    assert_eq!(live_weight(&l.f, next_id(&l.f) - 1), 2_000);
+    let relocked = l.lock(&env, released, 200); // 200 locked
+    let free_b = released; // 300 free
+    assert_eq!(total_weight(&l.f, next_id(&l.f) - 1), 2_000);
 
     let weight = |id: u64| l.f.client.get_receipt(&id).weight_kg;
     let status = |id: u64| l.f.client.get_receipt(&id).status;
@@ -314,28 +323,27 @@ fn acting_on_the_free_remainder_never_touches_the_locked_portion() {
     let l = setup_lending(&env);
     let root = l.f.mint(&env, "DEP-1");
     let locked = l.lock(&env, root, 1_200);
-    let free = locked + 1;
+    let free = root;
     let before = l.f.client.get_receipt(&locked);
 
     // Exit part of the free remainder, pledge another part to a second
-    // lender, then exit what is left.
+    // lender, then exit what is left. `free` keeps the rest each time.
     let second_lender = Address::generate(&env);
-    let exited = l.f.client.exit(&free, &l.f.custodian, &300, &300);
-    let free2 = exited + 1;
+    l.f.client.exit(&free, &l.f.custodian, &300, &300);
     let other_lock = l.f.client.lock(
-        &free2,
+        &free,
         &second_lender,
         &200,
         &String::from_str(&env, "LOAN-B"),
         &DUE,
         &0,
     );
-    l.f.client
-        .exit(&(other_lock + 1), &l.f.custodian, &300, &300);
+    l.f.client.exit(&free, &l.f.custodian, &300, &300);
+    assert_eq!(l.f.client.get_receipt(&free).status, Status::Exited);
 
     assert_eq!(l.f.client.get_receipt(&locked), before);
     assert_eq!(l.f.client.get_lock(&other_lock).lender, second_lender);
-    assert_eq!(live_weight(&l.f, next_id(&l.f) - 1), 2_000);
+    assert_eq!(total_weight(&l.f, next_id(&l.f) - 1), 2_000);
 }
 
 #[test]
@@ -344,19 +352,19 @@ fn acting_on_the_locked_portion_never_touches_the_free_remainder() {
     let l = setup_lending(&env);
     let root = l.f.mint(&env, "DEP-1");
     let locked = l.lock(&env, root, 1_200);
-    let free = locked + 1;
+    let free = root;
     let before = l.f.client.get_receipt(&free);
 
     l.f.client.extend_due(&locked, &(DUE + 1));
-    let released = l.f.client.unlock(&locked, &200);
+    l.f.client.unlock(&locked, &200);
     // The extension pushed the deadline out by one second.
     env.ledger().set_timestamp(DUE + 1 + GRACE + 1);
-    l.f.client.start_recovery(&(released + 1));
+    l.f.client.start_recovery(&locked);
     let buyer = Address::generate(&env);
-    l.complete(&env, released + 1, &buyer);
+    l.complete(&env, locked, &buyer);
 
     assert_eq!(l.f.client.get_receipt(&free), before);
-    assert_eq!(live_weight(&l.f, next_id(&l.f) - 1), 2_000);
+    assert_eq!(total_weight(&l.f, next_id(&l.f) - 1), 2_000);
 }
 
 /// `MaybeLock` has no accessor in the contract; tests want one.

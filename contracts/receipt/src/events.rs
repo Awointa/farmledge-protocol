@@ -15,7 +15,11 @@
 //! reference, timestamps — so it never has to read the receipt back.
 //! Lending events carry `receipt_id` and `lender` as topics. A partial exit,
 //! lock or unlock is preceded in the same transaction by a `Split` event
-//! linking the new ids to their parent.
+//! linking the new receipt to its parent.
+//!
+//! **`Split` events are the only on-chain record of a receipt's earlier
+//! weights**, because a split reduces the parent in place. The indexer must
+//! archive them; see `docs/archival.md`.
 
 use soroban_sdk::{contractevent, Address, Env, String, Symbol};
 
@@ -42,11 +46,13 @@ pub struct Minted {
     pub deposit_date: u64,
 }
 
-/// Emitted once per split, carrying both children. Weights and bag counts
-/// each sum to the parent's; both children inherit `owner`, `warehouse_id`,
-/// `status` and the pledge (`lender`, set when the parent was `Locked` or in
-/// `Recovery`) from it, and the caller's own event then says what became of
-/// the taken child.
+/// Emitted once per split. The parent keeps its id and becomes the
+/// remainder, so `remainder_id == parent_id`. `taken_id` is the new receipt.
+/// `parent_weight_kg` is the parent's weight before the split, and the two
+/// weights and bag counts after it each sum to the parent's before. The new
+/// receipt inherits `owner`, `warehouse_id`, `status` and the pledge
+/// (`lender`, set when the parent was `Locked` or in `Recovery`), and the
+/// caller's own event then says what became of it.
 #[contractevent]
 pub struct Split {
     #[topic]
@@ -93,9 +99,10 @@ pub struct Revoked {
     pub revoked_at: u64,
 }
 
-/// Emitted for every receipt `extend_ttl` / `extend_ttl_batch` is asked to
-/// keep alive. The host only actually extends an entry whose remaining TTL
-/// is under the threshold, so this records the request, not a rent payment.
+/// Emitted for every receipt `extend_ttl` / `extend_ttl_batch` keeps alive.
+/// An `Exited` or `Revoked` receipt is skipped and emits nothing. The host
+/// only actually extends an entry whose remaining TTL is under the
+/// threshold, so this records the request, not a rent payment.
 #[contractevent]
 pub struct TtlExtended {
     #[topic]
@@ -126,8 +133,9 @@ pub struct Locked {
 }
 
 /// `receipt_id` is the released receipt. On a partial unlock
-/// `remaining_receipt_id` is the portion still `Locked` / in `Recovery`,
-/// whose weight is `remainder_weight_kg` on the preceding `Split`.
+/// `receipt_id` is the new receipt split off and released, and
+/// `remaining_receipt_id` is the original receipt, still `Locked` / in
+/// `Recovery` with `remainder_weight_kg` from the preceding `Split`.
 #[contractevent]
 pub struct Unlocked {
     #[topic]

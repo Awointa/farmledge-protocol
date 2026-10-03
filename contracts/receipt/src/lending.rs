@@ -22,6 +22,22 @@ use crate::types::{
     WeightSource, DATA_VERSION,
 };
 
+/// Longest `loan_ref`, `sale_ref` or `settlement_ref` accepted, in bytes.
+///
+/// The point is the bound, not the bytes saved: each ref is stored in the
+/// `Lock`, every `Recovery` and the `Sale`, and copied onto every receipt
+/// split off, so an unbounded ref would let a caller inflate the rent of
+/// entries someone else keeps alive. 64 bytes fits a UUID, a bank
+/// reference or a hex SHA-256.
+pub const MAX_REF_LEN: u32 = 64;
+
+fn require_ref(r: &String) -> Result<(), Error> {
+    if r.len() > MAX_REF_LEN {
+        return Err(Error::RefTooLong);
+    }
+    Ok(())
+}
+
 /// **The pledge-eligibility rule.** Only scale-weighed receipts can be
 /// collateral: bag-count estimates drift with moisture and fill level.
 ///
@@ -40,8 +56,8 @@ pub fn is_pledgeable(receipt: &Receipt) -> bool {
 
 /// The pledge on a receipt that is currently `Locked` or in `Recovery`.
 ///
-/// A retired `Split` parent still carries the lock it had when it was
-/// divided; that is history, not a live pledge, so it is `NotLocked`.
+/// A receipt that is `Active`, `Exited` or `Revoked` has no live pledge, so
+/// it is `NotLocked`.
 pub fn current_lock(receipt: &Receipt) -> Result<Lock, Error> {
     match (&receipt.status, &receipt.lock) {
         (Status::Locked | Status::Recovery, MaybeLock::Some(lock)) => Ok(lock.clone()),
@@ -98,6 +114,7 @@ pub fn lock(
     if kg == 0 || kg > receipt.weight_kg {
         return Err(Error::InvalidSplitAmount);
     }
+    require_ref(&loan_ref)?;
 
     let mut locking = if kg == receipt.weight_kg {
         receipt
@@ -277,6 +294,7 @@ pub fn complete_recovery(
     if !admin::is_recovery_operator(env, &operator) {
         return Err(Error::RecoveryOperatorNotRegistered);
     }
+    require_ref(&sale_ref)?;
 
     let now = env.ledger().timestamp();
     let sale = Sale {
@@ -356,6 +374,7 @@ pub fn record_settlement(
     if sale.settlement_ref.is_some() {
         return Err(Error::RecoveryAlreadySettled);
     }
+    require_ref(&settlement_ref)?;
 
     let now = env.ledger().timestamp();
     sale.settlement_ref = Some(settlement_ref.clone());

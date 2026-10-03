@@ -3,9 +3,10 @@
 **Decision: the receipt contract is immutable.** It has no entry point that
 replaces its Wasm. A change ships as a new deployment, and receipts move to
 it through the drain-and-re-mint migration described below. Every stored
-`Receipt` and `Sale` carries a `data_version` (currently `1`, readable with
+`Receipt` and `Sale` carries a `data_version` (currently `2`, readable with
 `data_version()`), so any future tool or contract can tell which layout a
-record was written in.
+record was written in. Version 1 stored named-field maps; version 2 stores
+the positional layout in `src/layout.rs`.
 
 ## Why not admin-upgradeable
 
@@ -99,7 +100,8 @@ lender's hand. That is the guarantee, and also the cost.
 - The admin is installed by the constructor in the deploy transaction, so
   there is no unowned window in which someone else could claim the contract.
 - `DATA_VERSION` in `src/types.rs` must be bumped whenever a stored type's
-  fields change.
+  fields change, and that includes the field order and codes in
+  `src/layout.rs`, which are the storage layout.
 
 ## If you choose upgradeability anyway
 

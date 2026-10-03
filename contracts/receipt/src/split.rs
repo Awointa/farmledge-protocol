@@ -3,33 +3,42 @@
 //! Splitting is **internal to an operation**, never a callable entry point.
 //! `exit`, `lock` and `unlock` all divide receipts through this one helper.
 //!
-//! The model is a paper receipt being voided and reissued as two: the parent
-//! moves to [`Status::Split`] and is never mutated again, and exactly two
-//! children are created whose weights sum to it. Repeated splits therefore
-//! form an immutable binary tree in which the leaf weights always sum to the
-//! root — the invariant `prop_split.rs` fuzzes.
+//! A split happens **in place**: the receipt keeps its id, status, lock and
+//! recovery, and only its `weight_kg` and `bag_count` drop. The portion the
+//! operation acts on becomes one new receipt whose `parent_id` names it.
+//! Writing one receipt instead of retiring the parent and writing two halves
+//! the rent of every partial operation (measured in `docs/archival.md`).
+//!
+//! The trade: a receipt's weight is not fixed for life. Its history is the
+//! chain of `Split` events, each carrying the weight before and both
+//! weights after, plus `parent_id` on every receipt split off. The
+//! invariant `prop_split.rs` fuzzes is that the receipts of one deposit
+//! always sum to its minted weight and bag count.
 
 use soroban_sdk::Env;
 
 use crate::errors::Error;
 use crate::events;
 use crate::storage;
-use crate::types::{MaybeLock, Receipt, Status, DATA_VERSION};
+use crate::types::{MaybeLock, Receipt, DATA_VERSION};
 
-/// Both children of a split.
+/// Both sides of a split.
 pub struct SplitParts {
-    /// The `kg` the operation asked for. The caller mutates this one —
-    /// `exit` retires it, `lock` pledges it, `unlock` releases it.
+    /// The new receipt holding the `kg` the operation asked for. The caller
+    /// mutates this one: `exit` retires it, `lock` pledges it, `unlock`
+    /// releases it.
     pub taken: Receipt,
-    /// What is left. Keeps the parent's status, lock and recovery, so after a
-    /// partial exit or lock the remainder is still `Active`, and after a
-    /// partial unlock it is still `Locked` or in `Recovery`.
+    /// The original receipt, under its own id, holding what is left. It
+    /// keeps its status, lock and recovery, so after a partial exit or lock
+    /// it is still `Active`, and after a partial unlock it is still
+    /// `Locked` or in `Recovery`.
     pub remainder: Receipt,
 }
 
-/// Divides `parent` into `kg` and `parent.weight_kg - kg`.
+/// Divides `parent` into `kg` (a new receipt) and `parent.weight_kg - kg`
+/// (the parent itself).
 ///
-/// Writes all three receipts and indexes both children. Returns them for the
+/// Writes both receipts and indexes the new one. Returns them for the
 /// caller to finish mutating and re-persist.
 ///
 /// The caller is responsible for checking `parent.status` — `exit`, `lock`
@@ -46,31 +55,27 @@ pub fn split_receipt(env: &Env, parent: &Receipt, kg: u64) -> Result<SplitParts,
     let remainder_weight = parent.weight_kg - kg;
 
     // Pro-rate bags by weight, giving the remainder whatever rounding is left
-    // over so the two children's bag counts also sum exactly to the parent's.
+    // over so the two sides' bag counts also sum exactly to the parent's.
     // A very small `kg` can round to zero bags; that is correct for a
     // part-bag withdrawal, and `weight_kg` remains the authoritative quantity.
     let taken_bags = ((parent.bag_count as u128 * kg as u128) / parent.weight_kg as u128) as u32;
     let remainder_bags = parent.bag_count - taken_bags;
 
     let taken = child_of(env, parent, taken_weight, taken_bags);
-    let remainder = child_of(env, parent, remainder_weight, remainder_bags);
+    let mut remainder = parent.clone();
+    remainder.weight_kg = remainder_weight;
+    remainder.bag_count = remainder_bags;
 
-    // Retire the parent. This is its last write.
-    let mut retired = parent.clone();
-    retired.status = Status::Split;
-    storage::set_receipt(env, &retired);
-
-    storage::set_receipt(env, &taken);
     storage::set_receipt(env, &remainder);
+    storage::set_receipt(env, &taken);
 
-    for child in [&taken, &remainder] {
-        storage::index_owner(env, &child.owner, child.receipt_id);
-        storage::index_warehouse(env, &child.warehouse_id, child.receipt_id);
-        // Children of a pledged receipt stay pledged, so the lender's index
-        // must follow them.
-        if let MaybeLock::Some(lock) = &child.lock {
-            storage::index_lender(env, &lock.lender, child.receipt_id);
-        }
+    // The parent is already in every index it belongs to.
+    storage::index_owner(env, &taken.owner, taken.receipt_id);
+    storage::index_warehouse(env, &taken.warehouse_id, taken.receipt_id);
+    // Split off a pledged receipt, the new one starts out pledged too, so
+    // the lender's index must follow it.
+    if let MaybeLock::Some(lock) = &taken.lock {
+        storage::index_lender(env, &lock.lender, taken.receipt_id);
     }
 
     events::Split {
@@ -96,10 +101,10 @@ pub fn split_receipt(env: &Env, parent: &Receipt, kg: u64) -> Result<SplitParts,
     Ok(SplitParts { taken, remainder })
 }
 
-/// A child inherits everything identifying about the deposit — including
-/// `deposit_id`, since both halves are the same physical intake — and carries
-/// the parent's status and lock/recovery state forward. Only identity,
-/// quantity and lineage change.
+/// The new receipt inherits everything identifying about the deposit —
+/// including `deposit_id`, since it is the same physical intake — and
+/// carries the parent's status and lock/recovery state forward. Only
+/// identity, quantity and lineage differ.
 fn child_of(env: &Env, parent: &Receipt, weight_kg: u64, bag_count: u32) -> Receipt {
     Receipt {
         data_version: DATA_VERSION,

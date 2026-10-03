@@ -109,11 +109,10 @@ fn every_record_written_carries_the_current_data_version() {
 
     let root = l.f.mint(&env, "DEP-1");
     let locked = l.lock(&env, root, 1_500);
-    let free = locked + 1;
     l.default_and_recover(&env, locked);
     let sale = l.complete(&env, locked, &Address::generate(&env));
 
-    for id in [root, locked, free] {
+    for id in [root, locked] {
         assert_eq!(l.f.client.get_receipt(&id).data_version, DATA_VERSION);
     }
     assert_eq!(l.f.client.get_sale(&sale).data_version, DATA_VERSION);

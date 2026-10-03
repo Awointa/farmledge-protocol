@@ -7,7 +7,10 @@ use soroban_sdk::{contracttype, Address, String, Symbol, Vec};
 /// was written in lets a migration tool, or a future contract that reads
 /// this one, decode old records without guessing. Bump it whenever a stored
 /// type's fields change.
-pub const DATA_VERSION: u32 = 1;
+///
+/// - 1: named-field maps (the first Testnet deployment).
+/// - 2: the positional layout in `layout.rs`; splits divide in place.
+pub const DATA_VERSION: u32 = 2;
 
 /// How a receipt's weight was determined.
 ///
@@ -33,8 +36,12 @@ pub enum WeightSource {
 /// Locked   -> Recovery   start_recovery
 /// Recovery -> Active     unlock (farmer repaid before the sale completed)
 /// Recovery -> Active     complete_recovery (owner becomes the buyer)
-/// any live -> Split      internal, as part of a partial exit/lock/unlock
 /// ```
+///
+/// A partial exit, lock or unlock first splits the receipt *in place*: the
+/// receipt keeps its status and the remaining weight, and the portion acted
+/// on becomes a new receipt (see `split::split_receipt`). Splitting is not
+/// a status.
 ///
 /// A `Locked` or `Recovery` receipt can never be exited, revoked, or split by
 /// its owner. To void a pledged receipt the lender unlocks it first.
@@ -47,10 +54,6 @@ pub enum Status {
     Locked,
     /// Lender has begun default recovery. `lock` and `recovery` are both set.
     Recovery,
-    /// Superseded by a split: this receipt was divided into exactly two
-    /// children whose weights sum to it. Retained as an immutable audit
-    /// record and never mutated again. See `split::split_receipt`.
-    Split,
     /// Grain has left the warehouse. Terminal.
     Exited,
     /// Voided by the admin (e.g. a proven fraudulent mint). Terminal.
@@ -178,21 +181,26 @@ pub enum MaybeRecovery {
 /// A digital warehouse receipt for one lot of grain.
 ///
 /// `weight_kg` is the *book* weight the receipt is denominated in and is the
-/// quantity the conservation invariant applies to. `exit_weight_kg` is what
+/// quantity the conservation invariant applies to: across every receipt of
+/// one deposit it always sums to the minted weight. It is **not fixed for
+/// life**. A partial exit, lock or unlock moves part of it onto a new
+/// receipt, and the `Split` event records each such division. `exit_weight_kg` is what
 /// the grain actually weighed on the way out, which differs by shrinkage —
 /// recording both is the point of the exit flow.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Receipt {
     /// Layout version this record was written in; see [`DATA_VERSION`].
-    /// Split children are written fresh, so they carry the current one.
+    /// Every write re-stamps it, so it is always the current one.
     pub data_version: u32,
     /// Contract-assigned, auto-incrementing. Distinct from `deposit_id`.
     pub receipt_id: u64,
-    /// Client-generated intake reference. Unique across mints; children of a
-    /// split inherit their parent's, since they are the same physical deposit.
+    /// Client-generated intake reference. Unique across mints; a receipt
+    /// split off another inherits its parent's, since they are the same
+    /// physical deposit.
     pub deposit_id: String,
-    /// Set on both children of a split, `None` on a minted receipt.
+    /// The receipt this one was split off, `None` on a minted receipt. The
+    /// parent itself lives on with the remaining weight.
     pub parent_id: Option<u64>,
     pub commodity: Symbol,
     pub grade: Symbol,
@@ -213,8 +221,8 @@ pub struct Receipt {
     pub lock: MaybeLock,
     /// The open recovery; set only while `Recovery`.
     pub recovery: MaybeRecovery,
-    /// Every resolved recovery, oldest first. Append-only; split children
-    /// inherit their parent's.
+    /// Every resolved recovery, oldest first. Append-only; a receipt split
+    /// off another inherits its parent's.
     pub recovery_history: Vec<Recovery>,
     pub deposit_date: u64,
     pub exit_date: Option<u64>,

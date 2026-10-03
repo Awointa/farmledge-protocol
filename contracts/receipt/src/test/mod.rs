@@ -2,6 +2,7 @@
 
 mod adversarial;
 mod exit;
+mod layout;
 mod lock;
 mod mint;
 mod prop_lifecycle;
@@ -19,7 +20,7 @@ use soroban_sdk::{
     Address, Env, String, Symbol,
 };
 
-use crate::{ReceiptContract, ReceiptContractClient, Status, WeightSource};
+use crate::{ReceiptContract, ReceiptContractClient, WeightSource};
 
 pub const WAREHOUSE: &str = "WH_KANO_01";
 pub const COMMODITY: &str = "MAIZE_WHITE";
@@ -192,24 +193,23 @@ impl Lending<'_> {
     }
 }
 
-/// Every receipt that is not a retired `Split` parent — i.e. the leaves of
-/// the split tree plus any unsplit receipts. Split parents are excluded
-/// because their weight is already accounted for by their two children.
-pub fn leaves(f: &Fixture, highest_id: u64) -> std::vec::Vec<crate::Receipt> {
+/// Every receipt allocated so far, in id order. No receipt is ever
+/// superseded: a split reduces the parent in place and adds one receipt.
+pub fn receipts(f: &Fixture, highest_id: u64) -> std::vec::Vec<crate::Receipt> {
     (1..=highest_id)
         .filter_map(|id| f.client.try_get_receipt(&id).ok().and_then(|r| r.ok()))
-        .filter(|r| r.status != Status::Split)
         .collect()
 }
 
-/// Total book weight still accounted for across the split tree.
-pub fn live_weight(f: &Fixture, highest_id: u64) -> u64 {
-    leaves(f, highest_id).iter().map(|r| r.weight_kg).sum()
+/// Total book weight across every receipt — exited ones included, since an
+/// exit retires a receipt without changing its book weight.
+pub fn total_weight(f: &Fixture, highest_id: u64) -> u64 {
+    receipts(f, highest_id).iter().map(|r| r.weight_kg).sum()
 }
 
-/// Total bag count still accounted for across the split tree.
-pub fn live_bags(f: &Fixture, highest_id: u64) -> u32 {
-    leaves(f, highest_id).iter().map(|r| r.bag_count).sum()
+/// Total bag count across every receipt.
+pub fn total_bags(f: &Fixture, highest_id: u64) -> u32 {
+    receipts(f, highest_id).iter().map(|r| r.bag_count).sum()
 }
 
 /// Replaces all mocked auth with exactly `signers` authorising one call of

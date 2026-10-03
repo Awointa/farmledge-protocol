@@ -95,15 +95,16 @@ fn revoke_rejects_anything_not_active() {
         Err(Ok(Error::InvalidStatus))
     );
 
-    // A retired split parent — revoke its live children instead.
+    // After a partial exit: the exited portion is out of reach, and the
+    // parent, which kept the rest, is still revocable.
     let parent = f.mint(&env, "DEP-SPLIT");
-    let child = f.client.exit(&parent, &f.custodian, &500, &500);
+    let gone = f.client.exit(&parent, &f.custodian, &500, &500);
     assert_eq!(
-        f.client.try_revoke(&parent, &reason),
+        f.client.try_revoke(&gone, &reason),
         Err(Ok(Error::InvalidStatus))
     );
-    f.client.revoke(&(child + 1), &reason);
-    assert_eq!(f.client.get_receipt(&(child + 1)).status, Status::Revoked);
+    f.client.revoke(&parent, &reason);
+    assert_eq!(f.client.get_receipt(&parent).status, Status::Revoked);
 }
 
 #[test]

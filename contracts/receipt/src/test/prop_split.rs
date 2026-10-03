@@ -5,39 +5,51 @@
 //! `split::split_receipt`, so this property is the contract's safety net
 //! rather than a test of `exit` specifically. It drives the helper through
 //! `exit`; `prop_lifecycle.rs` drives it through every caller.
+//!
+//! A split reduces the parent in place and adds one receipt naming it as
+//! `parent_id`, so the receipts of a deposit form a tree rooted at the
+//! minted receipt, and every node's current weight plus everything split
+//! off below it is what that node held when it was created.
 
 use proptest::prelude::*;
 use soroban_sdk::Env;
 
-use super::{leaves, live_bags, live_weight, setup, Fixture};
+use super::{receipts, setup, total_bags, total_weight, Fixture};
 use crate::Status;
 
-/// For every receipt that was split, check its two children account for it
-/// exactly — in weight and in bags.
-pub fn assert_each_parent_is_covered_by_its_children(
+/// Weight and bags of `id` plus everything split off it, recursively.
+fn subtree(all: &[crate::Receipt], id: u64) -> (u64, u32) {
+    let me = all.iter().find(|r| r.receipt_id == id).unwrap();
+    all.iter()
+        .filter(|r| r.parent_id == Some(id))
+        .map(|child| subtree(all, child.receipt_id))
+        .fold((me.weight_kg, me.bag_count), |(w, b), (cw, cb)| {
+            (w + cw, b + cb)
+        })
+}
+
+/// The tree rooted at `root` still accounts for the whole deposit, and
+/// every split-off receipt names an earlier receipt of the same deposit.
+pub fn assert_lineage_accounts_for_the_deposit(
     f: &Fixture,
+    root: u64,
     highest_id: u64,
+    minted_kg: u64,
+    minted_bags: u32,
 ) -> Result<(), TestCaseError> {
-    let mut children: std::collections::BTreeMap<u64, (u32, u64, u32)> = Default::default();
-
-    for id in 1..=highest_id {
-        if let Ok(Ok(r)) = f.client.try_get_receipt(&id) {
-            if let Some(parent_id) = r.parent_id {
-                let entry = children.entry(parent_id).or_insert((0, 0, 0));
-                entry.0 += 1;
-                entry.1 += r.weight_kg;
-                entry.2 += r.bag_count;
-            }
+    let all = receipts(f, highest_id);
+    let root_receipt = all.iter().find(|r| r.receipt_id == root).unwrap();
+    for r in &all {
+        if let Some(parent_id) = r.parent_id {
+            prop_assert!(parent_id < r.receipt_id, "a parent predates its child");
+            let parent = all.iter().find(|p| p.receipt_id == parent_id).unwrap();
+            prop_assert_eq!(&parent.deposit_id, &r.deposit_id, "same physical deposit");
+        } else {
+            prop_assert_eq!(r.receipt_id, root, "only the minted receipt has no parent");
         }
+        prop_assert_eq!(&r.deposit_id, &root_receipt.deposit_id);
     }
-
-    for (parent_id, (count, weight, bags)) in children {
-        let parent = f.client.get_receipt(&parent_id);
-        prop_assert_eq!(count, 2, "a split produces exactly two children");
-        prop_assert_eq!(parent.status, Status::Split, "a split parent is retired");
-        prop_assert_eq!(weight, parent.weight_kg, "children's weight sums to parent");
-        prop_assert_eq!(bags, parent.bag_count, "children's bags sum to parent");
-    }
+    prop_assert_eq!(subtree(&all, root), (minted_kg, minted_bags));
     Ok(())
 }
 
@@ -57,25 +69,22 @@ proptest! {
         let f = setup(&env);
 
         let root = f.mint_weighing(&env, "DEP-PROP", total_kg, bags);
-        let mut active = root;
         let mut highest = root;
 
         for pct in cuts {
-            let current = f.client.get_receipt(&active);
+            // The root keeps whatever is left after each split.
+            let current = f.client.get_receipt(&root);
             let kg = current.weight_kg * pct as u64 / 100;
             if kg == 0 || kg >= current.weight_kg {
                 continue; // not a split; exit() would take its whole-receipt path
             }
-            // The split allocates `taken` then `remainder`, so the remainder
-            // is always the next id after the exited child.
-            let taken = f.client.exit(&active, &f.custodian, &kg, &kg);
-            active = taken + 1;
-            highest = active;
+            highest = f.client.exit(&root, &f.custodian, &kg, &kg);
         }
 
-        prop_assert_eq!(live_weight(&f, highest), total_kg, "weight is conserved");
-        prop_assert_eq!(live_bags(&f, highest), bags, "bag count is conserved");
-        assert_each_parent_is_covered_by_its_children(&f, highest)?;
+        prop_assert_eq!(total_weight(&f, highest), total_kg, "weight is conserved");
+        prop_assert_eq!(total_bags(&f, highest), bags, "bag count is conserved");
+        prop_assert_eq!(f.client.get_receipt(&root).status, Status::Active);
+        assert_lineage_accounts_for_the_deposit(&f, root, highest, total_kg, bags)?;
     }
 
     /// A single split of any valid size, including the extreme ends of the
@@ -93,17 +102,17 @@ proptest! {
 
         let root = f.mint_weighing(&env, "DEP-ONE", total_kg, bags);
         let taken = f.client.exit(&root, &f.custodian, &kg, &kg);
-        let remainder = taken + 1;
 
         let taken = f.client.get_receipt(&taken);
-        let remainder = f.client.get_receipt(&remainder);
+        let remainder = f.client.get_receipt(&root);
 
         prop_assert_eq!(taken.weight_kg + remainder.weight_kg, total_kg);
         prop_assert_eq!(taken.bag_count + remainder.bag_count, bags);
         prop_assert_eq!(taken.weight_kg, kg);
         prop_assert_eq!(taken.status, Status::Exited);
+        prop_assert_eq!(taken.parent_id, Some(root));
         prop_assert_eq!(remainder.status, Status::Active);
-        prop_assert_eq!(f.client.get_receipt(&root).status, Status::Split);
+        prop_assert_eq!(remainder.parent_id, None);
     }
 
     /// No split may ever mint a weightless receipt: a zero-weight receipt
@@ -118,21 +127,18 @@ proptest! {
         let f = setup(&env);
 
         let root = f.mint_weighing(&env, "DEP-ZERO", total_kg, 10);
-        let mut active = root;
         let mut highest = root;
 
         for pct in cuts {
-            let current = f.client.get_receipt(&active);
+            let current = f.client.get_receipt(&root);
             let kg = current.weight_kg * pct as u64 / 100;
             if kg == 0 || kg >= current.weight_kg {
                 continue;
             }
-            let taken = f.client.exit(&active, &f.custodian, &kg, &kg);
-            active = taken + 1;
-            highest = active;
+            highest = f.client.exit(&root, &f.custodian, &kg, &kg);
         }
 
-        for receipt in leaves(&f, highest) {
+        for receipt in receipts(&f, highest) {
             prop_assert!(receipt.weight_kg > 0, "receipt {} has no weight", receipt.receipt_id);
         }
     }
