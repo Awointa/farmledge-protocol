@@ -54,4 +54,8 @@ pub enum Error {
     LenderIsOwner = 36,
     /// No sale with this `sale_id` — the recovery was never completed.
     SaleNotFound = 37,
+
+    // --- operations ---
+    /// A batched keep-alive call named more entries than `MAX_TTL_BATCH`.
+    BatchTooLarge = 40,
 }

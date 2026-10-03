@@ -1,5 +1,14 @@
 use soroban_sdk::{contracttype, Address, String, Symbol, Vec};
 
+/// Layout version of every `Receipt` and `Sale` this build writes.
+///
+/// The contract is immutable (see `docs/upgrade.md`), so a layout change
+/// ships as a new deployment. Stamping each stored record with the layout it
+/// was written in lets a migration tool, or a future contract that reads
+/// this one, decode old records without guessing. Bump it whenever a stored
+/// type's fields change.
+pub const DATA_VERSION: u32 = 1;
+
 /// How a receipt's weight was determined.
 ///
 /// Phase 1 field testing is bag-count intake (`BagEstimate`); only `Scale`
@@ -114,6 +123,8 @@ pub struct Recovery {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Sale {
+    /// Layout version this record was written in; see [`DATA_VERSION`].
+    pub data_version: u32,
     pub sale_id: u64,
     /// The receipt that was sold, as it was at the moment of sale.
     pub receipt_id: u64,
@@ -173,6 +184,9 @@ pub enum MaybeRecovery {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Receipt {
+    /// Layout version this record was written in; see [`DATA_VERSION`].
+    /// Split children are written fresh, so they carry the current one.
+    pub data_version: u32,
     /// Contract-assigned, auto-incrementing. Distinct from `deposit_id`.
     pub receipt_id: u64,
     /// Client-generated intake reference. Unique across mints; children of a
@@ -206,4 +220,16 @@ pub struct Receipt {
     pub exit_date: Option<u64>,
     /// Actual weighed quantity at exit; may differ from `weight_kg`.
     pub exit_weight_kg: Option<u64>,
+}
+
+/// Names one paged index, for `extend_index_ttl`. Each variant matches a
+/// paged read: `get_receipts_by_owner`, `get_receipts_by_warehouse`,
+/// `get_receipts_by_lender` and `get_sales_by_lender`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Index {
+    Owner(Address),
+    Warehouse(Symbol),
+    Lender(Address),
+    LenderSales(Address),
 }

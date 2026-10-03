@@ -43,8 +43,9 @@ pub struct Minted {
 }
 
 /// Emitted once per split, carrying both children. Weights and bag counts
-/// each sum to the parent's; both children inherit `owner`, `warehouse_id`
-/// and `status` from it, and the caller's own event then says what became of
+/// each sum to the parent's; both children inherit `owner`, `warehouse_id`,
+/// `status` and the pledge (`lender`, set when the parent was `Locked` or in
+/// `Recovery`) from it, and the caller's own event then says what became of
 /// the taken child.
 #[contractevent]
 pub struct Split {
@@ -53,12 +54,15 @@ pub struct Split {
     pub owner: Address,
     pub warehouse_id: Symbol,
     pub status: Status,
+    pub lender: Option<Address>,
+    pub parent_weight_kg: u64,
     pub taken_id: u64,
     pub taken_weight_kg: u64,
     pub taken_bag_count: u32,
     pub remainder_id: u64,
     pub remainder_weight_kg: u64,
     pub remainder_bag_count: u32,
+    pub split_at: u64,
 }
 
 #[contractevent]
@@ -89,10 +93,19 @@ pub struct Revoked {
     pub revoked_at: u64,
 }
 
+/// Emitted for every receipt `extend_ttl` / `extend_ttl_batch` is asked to
+/// keep alive. The host only actually extends an entry whose remaining TTL
+/// is under the threshold, so this records the request, not a rent payment.
 #[contractevent]
 pub struct TtlExtended {
     #[topic]
     pub receipt_id: u64,
+    #[topic]
+    pub warehouse_id: Symbol,
+    pub owner: Address,
+    pub status: Status,
+    pub weight_kg: u64,
+    pub extended_at: u64,
 }
 
 // --- lending ---------------------------------------------------------------
@@ -204,17 +217,22 @@ pub struct SettlementRecorded {
 }
 
 // --- registries ------------------------------------------------------------
+//
+// Subject as a topic, timestamp in the data, so a registry change is as
+// self-contained as a receipt event.
 
 #[contractevent]
 pub struct WarehouseAdded {
     #[topic]
     pub warehouse_id: Symbol,
+    pub added_at: u64,
 }
 
 #[contractevent]
 pub struct WarehouseRemoved {
     #[topic]
     pub warehouse_id: Symbol,
+    pub removed_at: u64,
 }
 
 #[contractevent]
@@ -222,6 +240,7 @@ pub struct CustodianAdded {
     #[topic]
     pub warehouse_id: Symbol,
     pub custodian: Address,
+    pub added_at: u64,
 }
 
 #[contractevent]
@@ -229,30 +248,35 @@ pub struct CustodianRemoved {
     #[topic]
     pub warehouse_id: Symbol,
     pub custodian: Address,
+    pub removed_at: u64,
 }
 
 #[contractevent]
 pub struct VerifierAdded {
     #[topic]
     pub verifier: Address,
+    pub added_at: u64,
 }
 
 #[contractevent]
 pub struct VerifierRemoved {
     #[topic]
     pub verifier: Address,
+    pub removed_at: u64,
 }
 
 #[contractevent]
 pub struct RecoveryOperatorAdded {
     #[topic]
     pub operator: Address,
+    pub added_at: u64,
 }
 
 #[contractevent]
 pub struct RecoveryOperatorRemoved {
     #[topic]
     pub operator: Address,
+    pub removed_at: u64,
 }
 
 // --- emit helpers ----------------------------------------------------------
@@ -264,6 +288,7 @@ pub struct RecoveryOperatorRemoved {
 pub fn warehouse_added(env: &Env, warehouse_id: &Symbol) {
     WarehouseAdded {
         warehouse_id: warehouse_id.clone(),
+        added_at: env.ledger().timestamp(),
     }
     .publish(env);
 }
@@ -271,6 +296,7 @@ pub fn warehouse_added(env: &Env, warehouse_id: &Symbol) {
 pub fn warehouse_removed(env: &Env, warehouse_id: &Symbol) {
     WarehouseRemoved {
         warehouse_id: warehouse_id.clone(),
+        removed_at: env.ledger().timestamp(),
     }
     .publish(env);
 }
@@ -279,6 +305,7 @@ pub fn custodian_added(env: &Env, warehouse_id: &Symbol, custodian: &Address) {
     CustodianAdded {
         warehouse_id: warehouse_id.clone(),
         custodian: custodian.clone(),
+        added_at: env.ledger().timestamp(),
     }
     .publish(env);
 }
@@ -287,6 +314,7 @@ pub fn custodian_removed(env: &Env, warehouse_id: &Symbol, custodian: &Address) 
     CustodianRemoved {
         warehouse_id: warehouse_id.clone(),
         custodian: custodian.clone(),
+        removed_at: env.ledger().timestamp(),
     }
     .publish(env);
 }
@@ -294,6 +322,7 @@ pub fn custodian_removed(env: &Env, warehouse_id: &Symbol, custodian: &Address) 
 pub fn verifier_added(env: &Env, verifier: &Address) {
     VerifierAdded {
         verifier: verifier.clone(),
+        added_at: env.ledger().timestamp(),
     }
     .publish(env);
 }
@@ -301,6 +330,7 @@ pub fn verifier_added(env: &Env, verifier: &Address) {
 pub fn verifier_removed(env: &Env, verifier: &Address) {
     VerifierRemoved {
         verifier: verifier.clone(),
+        removed_at: env.ledger().timestamp(),
     }
     .publish(env);
 }
@@ -308,6 +338,7 @@ pub fn verifier_removed(env: &Env, verifier: &Address) {
 pub fn recovery_operator_added(env: &Env, operator: &Address) {
     RecoveryOperatorAdded {
         operator: operator.clone(),
+        added_at: env.ledger().timestamp(),
     }
     .publish(env);
 }
@@ -315,6 +346,7 @@ pub fn recovery_operator_added(env: &Env, operator: &Address) {
 pub fn recovery_operator_removed(env: &Env, operator: &Address) {
     RecoveryOperatorRemoved {
         operator: operator.clone(),
+        removed_at: env.ledger().timestamp(),
     }
     .publish(env);
 }

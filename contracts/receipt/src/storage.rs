@@ -1,6 +1,6 @@
 use soroban_sdk::{contracttype, Address, Env, String, Symbol, Vec};
 
-use crate::types::{Receipt, Sale};
+use crate::types::{Index, Receipt, Sale};
 
 /// ~5s per ledger.
 pub const DAY_IN_LEDGERS: u32 = 17_280;
@@ -56,6 +56,10 @@ pub enum DataKey {
     Sale(u64),
     /// `sale_id`s awaiting `record_settlement`, oldest first.
     UnsettledSales,
+    /// Every sale whose recovery `lender` started, paged like the receipt
+    /// indexes but holding `sale_id`s.
+    LenderSaleIndex(Address, u32),
+    LenderSalePages(Address),
 }
 
 // --- TTL -------------------------------------------------------------------
@@ -77,6 +81,15 @@ pub fn bump(env: &Env, key: &DataKey) {
 
 pub fn bump_receipt(env: &Env, receipt_id: u64) {
     bump(env, &DataKey::Receipt(receipt_id));
+}
+
+/// Bump `key` only if it exists. `extend_ttl` on a missing key traps, and
+/// keep-alive calls should not fail over an index page that was never
+/// written.
+pub fn bump_if_present(env: &Env, key: &DataKey) {
+    if env.storage().persistent().has(key) {
+        bump(env, key);
+    }
 }
 
 // --- receipts --------------------------------------------------------------
@@ -138,10 +151,7 @@ pub fn set_sale(env: &Env, sale: &Sale) {
 }
 
 pub fn bump_sale(env: &Env, sale_id: u64) {
-    let key = DataKey::Sale(sale_id);
-    if env.storage().persistent().has(&key) {
-        bump(env, &key);
-    }
+    bump_if_present(env, &DataKey::Sale(sale_id));
 }
 
 /// Unsettled sales are few and short-lived — each is removed as soon as the
@@ -175,16 +185,15 @@ pub fn remove_unsettled_sale(env: &Env, sale_id: u64) {
 
 // --- paged secondary indexes -----------------------------------------------
 
-/// Append `receipt_id` to the last page, starting a new page when the current
-/// one is full. Pages are append-only: a receipt is never removed from an
-/// index, because `Split`, `Exited` and `Revoked` receipts stay readable as
-/// audit records. Callers filter by `status`.
-fn push_index(
-    env: &Env,
-    pages_key: &DataKey,
-    mut page_key: impl FnMut(u32) -> DataKey,
-    receipt_id: u64,
-) {
+/// Append `id` (a receipt id, or a sale id for the lender-sale index) to the
+/// last page, starting a new page when the current one is full. Pages are
+/// append-only: a receipt is never removed from an index, because `Split`,
+/// `Exited` and `Revoked` receipts stay readable as audit records. Callers
+/// filter by `status`.
+///
+/// A full page is never written again, so nothing here keeps it alive past
+/// `ENTRY_TTL_EXTEND_TO`; `extend_index_ttl` exists for that.
+fn push_index(env: &Env, pages_key: &DataKey, mut page_key: impl FnMut(u32) -> DataKey, id: u64) {
     let store = env.storage().persistent();
     let pages: u32 = store.get(pages_key).unwrap_or(0);
 
@@ -200,7 +209,7 @@ fn push_index(
         }
     };
 
-    ids.push_back(receipt_id);
+    ids.push_back(id);
 
     let key = page_key(page);
     store.set(&key, &ids);
@@ -236,6 +245,17 @@ pub fn index_lender(env: &Env, lender: &Address, receipt_id: u64) {
         &DataKey::LenderPages(lender.clone()),
         |page| DataKey::LenderIndex(lender.clone(), page),
         receipt_id,
+    );
+}
+
+/// Every sale from a recovery `lender` started, so a lender can find its
+/// settlements without knowing receipt ids.
+pub fn index_lender_sale(env: &Env, lender: &Address, sale_id: u64) {
+    push_index(
+        env,
+        &DataKey::LenderSalePages(lender.clone()),
+        |page| DataKey::LenderSaleIndex(lender.clone(), page),
+        sale_id,
     );
 }
 
@@ -279,4 +299,40 @@ pub fn lender_pages(env: &Env, lender: &Address) -> u32 {
         .persistent()
         .get(&DataKey::LenderPages(lender.clone()))
         .unwrap_or(0)
+}
+
+pub fn lender_sale_page(env: &Env, lender: &Address, page: u32) -> Vec<u64> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::LenderSaleIndex(lender.clone(), page))
+        .unwrap_or(Vec::new(env))
+}
+
+pub fn lender_sale_pages(env: &Env, lender: &Address) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::LenderSalePages(lender.clone()))
+        .unwrap_or(0)
+}
+
+/// The page-count key and the key of page `page` for one paged index.
+pub fn index_keys(index: &Index, page: u32) -> (DataKey, DataKey) {
+    match index {
+        Index::Owner(a) => (
+            DataKey::OwnerPages(a.clone()),
+            DataKey::OwnerIndex(a.clone(), page),
+        ),
+        Index::Warehouse(w) => (
+            DataKey::WarehousePages(w.clone()),
+            DataKey::WarehouseIndex(w.clone(), page),
+        ),
+        Index::Lender(a) => (
+            DataKey::LenderPages(a.clone()),
+            DataKey::LenderIndex(a.clone(), page),
+        ),
+        Index::LenderSales(a) => (
+            DataKey::LenderSalePages(a.clone()),
+            DataKey::LenderSaleIndex(a.clone(), page),
+        ),
+    }
 }

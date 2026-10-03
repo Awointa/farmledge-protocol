@@ -108,10 +108,14 @@ pub fn add_warehouse(env: &Env, warehouse_id: Symbol) -> Result<(), Error> {
     Ok(())
 }
 
-/// Custodian registrations for this warehouse are left in place — the keys
-/// are `(warehouse, custodian)` pairs and cannot be enumerated to cascade.
-/// They are inert: `mint` requires the warehouse itself to be registered, so
-/// an orphaned custodian entry authorises nothing.
+/// Stops new mints against the warehouse. Custodian registrations for it are
+/// left in place — the keys are `(warehouse, custodian)` pairs and cannot be
+/// enumerated to cascade.
+///
+/// Those leftover registrations still authorise **exits**, deliberately:
+/// deregistering a warehouse must not trap grain its owners still hold, and
+/// every exit also needs the owner's signature. To stop exits too, remove
+/// the custodians individually.
 pub fn remove_warehouse(env: &Env, warehouse_id: Symbol) -> Result<(), Error> {
     deregister(env, DataKey::Warehouse(warehouse_id.clone()))?;
     events::warehouse_removed(env, &warehouse_id);

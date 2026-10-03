@@ -1,0 +1,9 @@
+# Registry bootstrap for scripts/deploy.sh. Copy to testnet.registry, fill in
+# the real addresses, and run:  REGISTRY=deployments/testnet.registry scripts/deploy.sh
+# One entry per line; blank lines and # comments are ignored. Order matters:
+# a warehouse must be registered before its custodians.
+#
+# warehouse  WH_KANO_01
+# custodian  WH_KANO_01 G...
+# verifier   G...
+# operator   G...

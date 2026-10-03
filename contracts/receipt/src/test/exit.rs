@@ -347,12 +347,15 @@ fn partial_exit_emits_split_then_exited() {
         owner: f.farmer.clone(),
         warehouse_id: f.warehouse.clone(),
         status: Status::Active,
+        lender: None,
+        parent_weight_kg: 2_000,
         taken_id: exited_id,
         taken_weight_kg: 500,
         taken_bag_count: 5,
         remainder_id: exited_id + 1,
         remainder_weight_kg: 1_500,
         remainder_bag_count: 15,
+        split_at: env.ledger().timestamp(),
     };
     let exited = crate::events::Exited {
         receipt_id: exited_id,

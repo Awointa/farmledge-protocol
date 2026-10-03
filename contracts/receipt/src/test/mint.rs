@@ -373,6 +373,9 @@ fn mint_rejects_invalid_measurements() {
         "moisture above 100.00%"
     );
 
+    // The boundary itself is accepted: 100.00% is a reading, not an error.
+    assert!(mint("DEP-M-MAX", 2_000, WeightSource::Scale, 20, 10_000).is_ok());
+
     // A scale-weighed lot with no bag count is legitimate (bulk intake).
     assert!(mint("DEP-BULK", 2_000, WeightSource::Scale, 0, MOISTURE).is_ok());
 }

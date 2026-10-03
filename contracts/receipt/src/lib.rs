@@ -5,10 +5,13 @@
 //! not a separate deployment.
 //!
 //! Covers the deposit-to-exit lifecycle (`mint`, `exit`, `revoke`,
-//! `extend_ttl`) and the lending lifecycle (`lock`, `unlock`, `extend_due`,
+//! `extend_ttl`, `extend_ttl_batch`, `extend_index_ttl`) and the lending lifecycle (`lock`, `unlock`, `extend_due`,
 //! `start_recovery`, `complete_recovery`, `record_settlement`). The legal status transitions are
 //! listed on [`Status`]. There is deliberately no user-to-user transfer, and
 //! no fees, pricing or settlement on-chain.
+//!
+//! The contract is **immutable**: there is no entry point that replaces its
+//! Wasm. Changes ship as a new deployment; see `docs/upgrade.md`.
 //!
 //! Soroban has no implicit caller identity. Every address whose signature an
 //! operation needs is an explicit parameter that gets `require_auth()`d;
@@ -33,31 +36,35 @@ use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 
 pub use errors::Error;
 pub use types::{
-    Lock, MaybeLock, MaybeRecovery, Receipt, Recovery, RecoveryResolution, Sale, Status,
-    WeightSource,
+    Index, Lock, MaybeLock, MaybeRecovery, Receipt, Recovery, RecoveryResolution, Sale, Status,
+    WeightSource, DATA_VERSION,
 };
 
 /// Upper bound on `moisture_pct`, in basis points of a percent (100.00%).
 const MAX_MOISTURE_BPS: u32 = 10_000;
+
+/// Most receipts (or index pages) one keep-alive call may name. Sized from
+/// measured Testnet costs, not guessed — see `docs/archival.md`.
+pub const MAX_TTL_BATCH: u32 = 25;
 
 #[contract]
 pub struct ReceiptContract;
 
 #[contractimpl]
 impl ReceiptContract {
-    /// One-time setup. Rejects re-initialisation.
+    /// Runs once, inside the deploy transaction itself.
+    ///
+    /// A constructor rather than an `initialize` call, so there is no window
+    /// between deploy and setup in which someone else could claim the admin
+    /// role. `admin` does not sign: whoever deploys chooses it, and naming
+    /// an address as admin grants it nothing it did not already control.
     ///
     /// `admin` will be a Stellar multisig account in production; the contract
     /// only ever calls `require_auth()` on it and implements no multisig
     /// logic of its own.
-    pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
-        if admin::get_admin(&env).is_some() {
-            return Err(Error::AlreadyInitialized);
-        }
-        admin.require_auth();
+    pub fn __constructor(env: Env, admin: Address) {
         admin::set_admin(&env, &admin);
         storage::bump_instance(&env);
-        Ok(())
     }
 
     // --- lifecycle ---------------------------------------------------------
@@ -116,6 +123,7 @@ impl ReceiptContract {
 
         let receipt_id = storage::next_receipt_id(&env);
         let receipt = Receipt {
+            data_version: DATA_VERSION,
             receipt_id,
             deposit_id: deposit_id.clone(),
             parent_id: None,
@@ -267,23 +275,83 @@ impl ReceiptContract {
     /// anyone else with an interest in the receipt surviving.
     ///
     /// Also bumps the receipt's `deposit_id` guard entry, keeping the
-    /// duplicate-mint protection alive alongside the receipt it protects, and
-    /// any `Sale` records its recovery history refers to.
+    /// duplicate-mint protection alive alongside the receipt it protects, any
+    /// `Sale` records its recovery history refers to, the unsettled-sales
+    /// list and the contract instance. Index pages are kept alive separately
+    /// by `extend_index_ttl`.
     pub fn extend_ttl(env: Env, receipt_id: u64) -> Result<(), Error> {
-        let receipt = storage::get_receipt(&env, receipt_id).ok_or(Error::ReceiptNotFound)?;
+        Self::extend_ttl_batch(env.clone(), Vec::from_array(&env, [receipt_id])).map(|_| ())
+    }
 
-        storage::bump_receipt(&env, receipt_id);
-        storage::bump_deposit_index(&env, &receipt.deposit_id);
-        // Sale records live in their own entries; keep any this receipt's
-        // history points at alive alongside it.
-        for recovery in receipt.recovery_history.iter() {
-            if let Some(sale_id) = recovery.sale_id {
-                storage::bump_sale(&env, sale_id);
+    /// `extend_ttl` for up to `MAX_TTL_BATCH` receipts in one transaction.
+    ///
+    /// All-or-nothing: an unknown id fails the whole batch with
+    /// `ReceiptNotFound`, because it means the caller's list has drifted
+    /// from the chain (after a Testnet reset, say) and that should be loud.
+    /// Returns the number of receipts extended.
+    pub fn extend_ttl_batch(env: Env, receipt_ids: Vec<u64>) -> Result<u32, Error> {
+        if receipt_ids.len() > MAX_TTL_BATCH {
+            return Err(Error::BatchTooLarge);
+        }
+        let now = env.ledger().timestamp();
+        for receipt_id in receipt_ids.iter() {
+            let receipt = storage::get_receipt(&env, receipt_id).ok_or(Error::ReceiptNotFound)?;
+
+            storage::bump_receipt(&env, receipt_id);
+            storage::bump_deposit_index(&env, &receipt.deposit_id);
+            // Sale records live in their own entries; keep any this receipt's
+            // history points at alive alongside it.
+            for recovery in receipt.recovery_history.iter() {
+                if let Some(sale_id) = recovery.sale_id {
+                    storage::bump_sale(&env, sale_id);
+                }
+            }
+
+            events::TtlExtended {
+                receipt_id,
+                warehouse_id: receipt.warehouse_id,
+                owner: receipt.owner,
+                status: receipt.status,
+                weight_kg: receipt.weight_kg,
+                extended_at: now,
+            }
+            .publish(&env);
+        }
+        storage::bump_if_present(&env, &storage::DataKey::UnsettledSales);
+        storage::bump_instance(&env);
+        Ok(receipt_ids.len())
+    }
+
+    /// Keeps `page_count` pages of one paged index alive, starting at
+    /// `first_page`, plus the index's page counter. Callable by anyone.
+    ///
+    /// Needed because an index page is only written while it is filling: once
+    /// it holds 64 ids nothing writes it again, and without this it would be
+    /// archived ~175 days later, taking that page of the read with it. Pages
+    /// past the end are skipped. Returns the number of pages that exist in
+    /// the requested range.
+    pub fn extend_index_ttl(
+        env: Env,
+        index: Index,
+        first_page: u32,
+        page_count: u32,
+    ) -> Result<u32, Error> {
+        if page_count > MAX_TTL_BATCH {
+            return Err(Error::BatchTooLarge);
+        }
+        let (pages_key, _) = storage::index_keys(&index, 0);
+        storage::bump_if_present(&env, &pages_key);
+
+        let mut extended = 0;
+        for page in first_page..first_page.saturating_add(page_count) {
+            let (_, page_key) = storage::index_keys(&index, page);
+            if env.storage().persistent().has(&page_key) {
+                storage::bump(&env, &page_key);
+                extended += 1;
             }
         }
-
-        events::TtlExtended { receipt_id }.publish(&env);
-        Ok(())
+        storage::bump_instance(&env);
+        Ok(extended)
     }
 
     // --- lending -----------------------------------------------------------
@@ -408,6 +476,23 @@ impl ReceiptContract {
         storage::get_sale(&env, sale_id).ok_or(Error::SaleNotFound)
     }
 
+    /// One page of every sale from a recovery `lender` started, settled or
+    /// not, oldest first, 64 per page.
+    pub fn get_sales_by_lender(env: Env, lender: Address, page: u32) -> Vec<Sale> {
+        let mut out = Vec::new(&env);
+        for sale_id in storage::lender_sale_page(&env, &lender, page).iter() {
+            if let Some(sale) = storage::get_sale(&env, sale_id) {
+                out.push_back(sale);
+            }
+        }
+        out
+    }
+
+    /// Number of pages `get_sales_by_lender` will serve.
+    pub fn lender_sale_page_count(env: Env, lender: Address) -> u32 {
+        storage::lender_sale_pages(&env, &lender)
+    }
+
     /// Completed recoveries still waiting for `record_settlement`, oldest
     /// first, 64 per page.
     pub fn get_unsettled_sales(env: Env, page: u32) -> Vec<Sale> {
@@ -432,6 +517,13 @@ impl ReceiptContract {
 
     pub fn get_receipt(env: Env, receipt_id: u64) -> Result<Receipt, Error> {
         storage::get_receipt(&env, receipt_id).ok_or(Error::ReceiptNotFound)
+    }
+
+    /// The `data_version` this build stamps on every record it writes. A
+    /// record whose own `data_version` is lower was written by an older
+    /// layout; see `docs/upgrade.md`.
+    pub fn data_version(_env: Env) -> u32 {
+        DATA_VERSION
     }
 
     /// One page of an owner's receipts, newest last, 64 per page.
@@ -504,9 +596,10 @@ impl ReceiptContract {
 }
 
 impl ReceiptContract {
-    /// Receipt ids are only ever written alongside their receipt, so a
-    /// missing entry means an archived one; skipping keeps a page readable
-    /// rather than failing the whole query.
+    /// Receipt ids are only ever indexed alongside their receipt, so every
+    /// id resolves. An *archived* receipt does not read as missing either: it
+    /// is restored as part of the call (see `docs/archival.md`). The `if let`
+    /// is defensive, not a recovery path.
     fn collect(env: &Env, ids: Vec<u64>) -> Vec<Receipt> {
         let mut out = Vec::new(env);
         for id in ids.iter() {

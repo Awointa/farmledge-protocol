@@ -206,12 +206,15 @@ fn unlocked_event_marks_a_partial_release() {
         owner: l.f.farmer.clone(),
         warehouse_id: l.f.warehouse.clone(),
         status: Status::Locked,
+        lender: Some(l.lender.clone()),
+        parent_weight_kg: 2_000,
         taken_id: released,
         taken_weight_kg: 700,
         taken_bag_count: 7,
         remainder_id: released + 1,
         remainder_weight_kg: 1_300,
         remainder_bag_count: 13,
+        split_at: env.ledger().timestamp(),
     };
     let unlocked = crate::events::Unlocked {
         receipt_id: released,

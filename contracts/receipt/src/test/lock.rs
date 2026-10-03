@@ -432,12 +432,15 @@ fn partial_lock_emits_split_then_locked() {
         owner: l.f.farmer.clone(),
         warehouse_id: l.f.warehouse.clone(),
         status: Status::Active,
+        lender: None,
+        parent_weight_kg: 2_000,
         taken_id: locked,
         taken_weight_kg: 600,
         taken_bag_count: 6,
         remainder_id: locked + 1,
         remainder_weight_kg: 1_400,
         remainder_bag_count: 14,
+        split_at: env.ledger().timestamp(),
     };
     let lock = crate::events::Locked {
         receipt_id: locked,

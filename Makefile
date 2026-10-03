@@ -5,7 +5,8 @@
 #   make fmt / fmt-check
 #   make clippy          warnings are errors
 #   make ci              everything CI runs, in CI's order
-#   make deploy-testnet  build, deploy, initialize, record the contract id
+#   make deploy-testnet  build, deploy, record deployments/testnet.json
+#   make contract-id     print the recorded contract id
 
 NETWORK    ?= testnet
 SOURCE     ?= farmledge-admin
@@ -13,12 +14,13 @@ SOURCE     ?= farmledge-admin
 #   make deploy-testnet ADMIN=G...
 ADMIN      ?=
 WASM       := target/wasm32v1-none/release/farmledge_receipt.wasm
-DEPLOYMENT := deployments/$(NETWORK).env
+DEPLOYMENT := deployments/$(NETWORK).json
+REGISTRY   ?=
 
-.PHONY: help build test fmt fmt-check clippy ci clean deploy-testnet contract-id
+.PHONY: help build test fmt fmt-check clippy ci clean deploy-testnet contract-id check-immutable
 
 help:
-	@sed -n '2,9p' $(MAKEFILE_LIST) | sed 's/^# \?//'
+	@sed -n '2,10p' $(MAKEFILE_LIST) | sed 's/^# \?//'
 
 build:
 	stellar contract build
@@ -35,42 +37,30 @@ fmt-check:
 clippy:
 	cargo clippy --workspace --all-targets -- -D warnings
 
-ci: fmt-check clippy test build
+ci: fmt-check clippy check-immutable test build
 
+# Leaves deployments/ alone: those records are committed.
 clean:
 	cargo clean
-	rm -rf deployments
 
 # --- deployment -------------------------------------------------------------
 #
-# `initialize` is a plain function rather than `__constructor`, so deploying
-# and initialising are two steps. Between them the contract is unowned and
-# anyone could claim it — run them back to back, which is what this target
-# does, and confirm the admin afterwards.
+# One command: build, deploy (the constructor installs the admin in the same
+# transaction), optionally bootstrap registries, and record the result in
+# deployments/$(NETWORK).json. stdout is that JSON record and nothing else.
+#
+#   make deploy-testnet
+#   make deploy-testnet REGISTRY=deployments/testnet.registry
+#   make deploy-testnet ADMIN=G...        # a multisig admin
 
-deploy-testnet: build
-	@mkdir -p deployments
-	@stellar keys address $(SOURCE) >/dev/null 2>&1 \
-		|| stellar keys generate $(SOURCE) --network $(NETWORK) --fund
-	@admin="$(ADMIN)"; \
-	if [ -z "$$admin" ]; then admin=$$(stellar keys address $(SOURCE)); fi; \
-	echo "==> deploying to $(NETWORK) as $(SOURCE), admin $$admin"; \
-	id=$$(stellar contract deploy \
-		--wasm $(WASM) \
-		--source-account $(SOURCE) \
-		--network $(NETWORK) \
-		2>/dev/null | tail -1); \
-	echo "==> contract $$id"; \
-	stellar contract invoke \
-		--id $$id \
-		--source-account $(SOURCE) \
-		--network $(NETWORK) \
-		-- initialize --admin $$admin; \
-	printf 'CONTRACT_ID=%s\nNETWORK=%s\nADMIN=%s\nWASM_SHA256=%s\n' \
-		"$$id" "$(NETWORK)" "$$admin" "$$(sha256sum $(WASM) | cut -d' ' -f1)" \
-		> $(DEPLOYMENT); \
-	echo "==> recorded in $(DEPLOYMENT)"; \
-	cat $(DEPLOYMENT)
+deploy-testnet:
+	@NETWORK=$(NETWORK) SOURCE=$(SOURCE) ADMIN=$(ADMIN) REGISTRY=$(REGISTRY) scripts/deploy.sh
 
 contract-id:
-	@grep '^CONTRACT_ID=' $(DEPLOYMENT) | cut -d= -f2
+	@jq -r .contract_id $(DEPLOYMENT)
+
+# The contract must stay immutable (docs/upgrade.md): no Wasm-replacing
+# entry point may ever be added.
+check-immutable:
+	@! grep -rn "update_current_contract_wasm" contracts/*/src \
+		|| { echo "contract must stay immutable: see docs/upgrade.md"; exit 1; }

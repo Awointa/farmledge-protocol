@@ -7,44 +7,31 @@ use super::{setup, setup_bare, COMMODITY, GRADE, MOISTURE, WAREHOUSE};
 use crate::{Error, ReceiptContract, ReceiptContractClient, WeightSource};
 
 #[test]
-fn initialize_runs_once() {
+fn the_constructor_installs_the_admin_in_the_deploy_itself() {
     let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register(ReceiptContract, ());
-    let client = ReceiptContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    let usurper = Address::generate(&env);
+    let stranger = Address::generate(&env);
 
-    client.initialize(&admin);
-
-    assert_eq!(
-        client.try_initialize(&admin),
-        Err(Ok(Error::AlreadyInitialized))
-    );
-    assert_eq!(
-        client.try_initialize(&usurper),
-        Err(Ok(Error::AlreadyInitialized)),
-        "a second party cannot claim an initialised contract"
-    );
-}
-
-#[test]
-fn registry_calls_before_initialize_are_rejected() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register(ReceiptContract, ());
+    // Registered with its admin in one step: there is no moment at which the
+    // contract exists without one, and so nothing for a third party to claim.
+    let contract_id = env.register(ReceiptContract, (admin.clone(),));
     let client = ReceiptContractClient::new(&env, &contract_id);
+    let warehouse = Symbol::new(&env, WAREHOUSE);
 
-    assert_eq!(
-        client.try_add_warehouse(&Symbol::new(&env, WAREHOUSE)),
-        Err(Ok(Error::NotInitialized))
-    );
-    assert_eq!(
-        client.try_add_verifier(&Address::generate(&env)),
-        Err(Ok(Error::NotInitialized))
-    );
+    let add_as = |who: &Address| {
+        env.mock_auths(&[MockAuth {
+            address: who,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "add_warehouse",
+                args: (warehouse.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.try_add_warehouse(&warehouse)
+    };
+    assert!(add_as(&stranger).is_err());
+    assert_eq!(add_as(&admin), Ok(Ok(())));
 }
 
 // --- happy paths -----------------------------------------------------------
@@ -277,4 +264,94 @@ fn deregistering_a_warehouse_stops_minting_against_it() {
     assert!(f.client.try_get_receipt(&1).is_ok());
     f.client.exit(&1, &f.custodian, &2_000, &2_000);
     assert_eq!(f.client.get_receipt(&1).status, crate::Status::Exited);
+}
+
+#[test]
+fn every_registry_change_emits_its_event_with_a_timestamp() {
+    use crate::events::*;
+    use soroban_sdk::{
+        testutils::{Events as _, Ledger as _},
+        Event as _,
+    };
+
+    let env = Env::default();
+    let f = setup_bare(&env);
+    env.ledger().set_timestamp(1_700_000_123);
+    let at = 1_700_000_123;
+    let wh = f.warehouse.clone();
+    let operator = Address::generate(&env);
+
+    // `env.events().all()` holds the events of the most recent call only.
+    let check = |expected: soroban_sdk::xdr::ContractEvent| {
+        assert_eq!(env.events().all(), std::vec![expected]);
+    };
+    let id = &f.contract_id;
+
+    f.client.add_warehouse(&wh);
+    check(
+        WarehouseAdded {
+            warehouse_id: wh.clone(),
+            added_at: at,
+        }
+        .to_xdr(&env, id),
+    );
+    f.client.add_custodian(&wh, &f.custodian);
+    check(
+        CustodianAdded {
+            warehouse_id: wh.clone(),
+            custodian: f.custodian.clone(),
+            added_at: at,
+        }
+        .to_xdr(&env, id),
+    );
+    f.client.add_verifier(&f.verifier);
+    check(
+        VerifierAdded {
+            verifier: f.verifier.clone(),
+            added_at: at,
+        }
+        .to_xdr(&env, id),
+    );
+    f.client.add_recovery_operator(&operator);
+    check(
+        RecoveryOperatorAdded {
+            operator: operator.clone(),
+            added_at: at,
+        }
+        .to_xdr(&env, id),
+    );
+
+    f.client.remove_recovery_operator(&operator);
+    check(
+        RecoveryOperatorRemoved {
+            operator,
+            removed_at: at,
+        }
+        .to_xdr(&env, id),
+    );
+    f.client.remove_verifier(&f.verifier);
+    check(
+        VerifierRemoved {
+            verifier: f.verifier.clone(),
+            removed_at: at,
+        }
+        .to_xdr(&env, id),
+    );
+    f.client.remove_custodian(&wh, &f.custodian);
+    check(
+        CustodianRemoved {
+            warehouse_id: wh.clone(),
+            custodian: f.custodian.clone(),
+            removed_at: at,
+        }
+        .to_xdr(&env, id),
+    );
+    f.client.remove_warehouse(&wh);
+    check(
+        WarehouseRemoved {
+            warehouse_id: wh,
+            removed_at: at,
+        }
+        .to_xdr(&env, id),
+    );
 }

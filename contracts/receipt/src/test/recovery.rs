@@ -304,6 +304,7 @@ fn complete_recovery_hands_the_receipt_to_the_buyer_and_records_the_sale() {
     assert_eq!(
         l.f.client.get_sale(&sale_id),
         crate::Sale {
+            data_version: crate::DATA_VERSION,
             sale_id,
             receipt_id: id,
             warehouse_id: l.f.warehouse.clone(),

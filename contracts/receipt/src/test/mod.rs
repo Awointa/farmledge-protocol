@@ -1,10 +1,12 @@
 #![cfg(test)]
 
+mod adversarial;
 mod exit;
 mod lock;
 mod mint;
-mod prop_lending;
+mod prop_lifecycle;
 mod prop_split;
+mod reads;
 mod recovery;
 mod registry;
 mod revoke;
@@ -43,16 +45,14 @@ pub struct Fixture<'a> {
 pub fn setup(env: &Env) -> Fixture<'_> {
     env.mock_all_auths();
 
-    let contract_id = env.register(ReceiptContract, ());
+    let admin = Address::generate(env);
+    let contract_id = env.register(ReceiptContract, (admin.clone(),));
     let client = ReceiptContractClient::new(env, &contract_id);
 
-    let admin = Address::generate(env);
     let custodian = Address::generate(env);
     let verifier = Address::generate(env);
     let farmer = Address::generate(env);
     let warehouse = Symbol::new(env, WAREHOUSE);
-
-    client.initialize(&admin);
     client.add_warehouse(&warehouse);
     client.add_custodian(&warehouse, &custodian);
     client.add_verifier(&verifier);
@@ -72,16 +72,14 @@ pub fn setup(env: &Env) -> Fixture<'_> {
 pub fn setup_bare(env: &Env) -> Fixture<'_> {
     env.mock_all_auths();
 
-    let contract_id = env.register(ReceiptContract, ());
+    let admin = Address::generate(env);
+    let contract_id = env.register(ReceiptContract, (admin.clone(),));
     let client = ReceiptContractClient::new(env, &contract_id);
 
-    let admin = Address::generate(env);
     let custodian = Address::generate(env);
     let verifier = Address::generate(env);
     let farmer = Address::generate(env);
     let warehouse = Symbol::new(env, WAREHOUSE);
-
-    client.initialize(&admin);
 
     Fixture {
         client,

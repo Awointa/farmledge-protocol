@@ -4,7 +4,7 @@
 //! `exit`, `lock` and `unlock` all divide receipts through
 //! `split::split_receipt`, so this property is the contract's safety net
 //! rather than a test of `exit` specifically. It drives the helper through
-//! `exit`; `prop_lending.rs` drives it through every caller.
+//! `exit`; `prop_lifecycle.rs` drives it through every caller.
 
 use proptest::prelude::*;
 use soroban_sdk::Env;

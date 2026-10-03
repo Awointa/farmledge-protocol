@@ -14,7 +14,7 @@ use soroban_sdk::Env;
 use crate::errors::Error;
 use crate::events;
 use crate::storage;
-use crate::types::{MaybeLock, Receipt, Status};
+use crate::types::{MaybeLock, Receipt, Status, DATA_VERSION};
 
 /// Both children of a split.
 pub struct SplitParts {
@@ -78,12 +78,18 @@ pub fn split_receipt(env: &Env, parent: &Receipt, kg: u64) -> Result<SplitParts,
         owner: parent.owner.clone(),
         warehouse_id: parent.warehouse_id.clone(),
         status: parent.status.clone(),
+        lender: match &parent.lock {
+            MaybeLock::Some(lock) => Some(lock.lender.clone()),
+            MaybeLock::None => None,
+        },
+        parent_weight_kg: parent.weight_kg,
         taken_id: taken.receipt_id,
         taken_weight_kg: taken_weight,
         taken_bag_count: taken_bags,
         remainder_id: remainder.receipt_id,
         remainder_weight_kg: remainder_weight,
         remainder_bag_count: remainder_bags,
+        split_at: env.ledger().timestamp(),
     }
     .publish(env);
 
@@ -96,6 +102,7 @@ pub fn split_receipt(env: &Env, parent: &Receipt, kg: u64) -> Result<SplitParts,
 /// quantity and lineage change.
 fn child_of(env: &Env, parent: &Receipt, weight_kg: u64, bag_count: u32) -> Receipt {
     Receipt {
+        data_version: DATA_VERSION,
         receipt_id: storage::next_receipt_id(env),
         deposit_id: parent.deposit_id.clone(),
         parent_id: Some(parent.receipt_id),

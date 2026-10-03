@@ -19,7 +19,7 @@ use crate::split;
 use crate::storage;
 use crate::types::{
     Lock, MaybeLock, MaybeRecovery, Receipt, Recovery, RecoveryResolution, Sale, Status,
-    WeightSource,
+    WeightSource, DATA_VERSION,
 };
 
 /// **The pledge-eligibility rule.** Only scale-weighed receipts can be
@@ -280,6 +280,7 @@ pub fn complete_recovery(
 
     let now = env.ledger().timestamp();
     let sale = Sale {
+        data_version: DATA_VERSION,
         sale_id: storage::next_sale_id(env),
         receipt_id,
         warehouse_id: receipt.warehouse_id.clone(),
@@ -310,6 +311,7 @@ pub fn complete_recovery(
     storage::set_receipt(env, &receipt);
     storage::set_sale(env, &sale);
     storage::push_unsettled_sale(env, sale.sale_id);
+    storage::index_lender_sale(env, &sale.lender, sale.sale_id);
     storage::index_owner(env, &buyer, receipt_id);
     storage::bump_instance(env);
 

@@ -5,3 +5,4 @@ test_snapshots/
 .DS_Store
 *.wasm
 !*.optimized.wasm
+__pycache__/

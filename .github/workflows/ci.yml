@@ -48,6 +48,10 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # docs/upgrade.md: no entry point may replace the contract's Wasm.
+      - name: Contract is immutable
+        run: make check-immutable
+
       - name: Test
         run: cargo test --workspace
 
