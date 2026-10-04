@@ -9,5 +9,8 @@
   "start_ledger": 4971770,
   "data_version": 1,
   "git_commit": "324e1f565a05dc15d6825fbfc6219670c78ff78f-dirty",
-  "deployed_at": "2026-10-01T19:20:54Z"
+  "deployed_at": "2026-10-01T19:20:54Z",
+  "status": "retired",
+  "retired_at": "2026-10-03",
+  "superseded_by": "CDLSGBNISQ7F3ROSEE5MHAZEZYNUV5LOGQA2EWTP4BPODLQT4G2LZJW3"
 }

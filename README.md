@@ -46,12 +46,13 @@ source of truth for the backend.
 
 | Network | Contract ID | Notes |
 |---|---|---|
-| Testnet | `CDLSGBNISQ7F3ROSEE5MHAZEZYNUV5LOGQA2EWTP4BPODLQT4G2LZJW3` | **Current.** `data_version` 2: compact storage, splits in place, finished receipts left to archive, 64-byte ref caps. Deployed 2026-10-03 |
-| Testnet | `CBTFO2N4A7ILUX6H72FFZOGWF62ZCAKB4I6X6CI52Q2522DVNKECW6KU` | Superseded 2026-10-03. Immutable build with a constructor, `data_version` 1, batched keep-alive, `get_sales_by_lender`, and self-contained `split` / `ttl_extended` / registry events |
-| Testnet | `CCHVG565ABRRCZCVBZLO3FM42EILZXQMT62HKRT7DMGJUATOJSVQZ7RB` | Superseded 2026-10-01. Lending lifecycle with sale records |
-| Testnet | `CAZJUMEN2JMUT7HUNRUXC6ABSX5M2UOZ3RIBJPRYATHIA7L2QOUHKTET` | Superseded 2026-09-30. First lending build |
+| Testnet | `CB3PY2P5ZJ5TQIUEAZRGXOYKXKAZZVAMXCRG25GRWLURTKMKNXKYFPEM` | **Current.** `data_version` 2: compact storage, splits in place, finished receipts left to archive, 64-byte caps on `deposit_id` and the lending refs. Deployed 2026-10-04 |
+| Testnet | `CDLSGBNISQ7F3ROSEE5MHAZEZYNUV5LOGQA2EWTP4BPODLQT4G2LZJW3` | **Retired** 2026-10-04. As current, but without the `deposit_id` cap. The `data_version` 2 costs in `docs/archival.md` were measured on it |
+| Testnet | `CBTFO2N4A7ILUX6H72FFZOGWF62ZCAKB4I6X6CI52Q2522DVNKECW6KU` | **Retired** 2026-10-03. `data_version` 1: immutable build with a constructor, batched keep-alive, `get_sales_by_lender`, self-contained events |
+| Testnet | `CCHVG565ABRRCZCVBZLO3FM42EILZXQMT62HKRT7DMGJUATOJSVQZ7RB` | **Retired** 2026-10-01. Lending lifecycle with sale records |
+| Testnet | `CAZJUMEN2JMUT7HUNRUXC6ABSX5M2UOZ3RIBJPRYATHIA7L2QOUHKTET` | **Retired** 2026-09-30. First lending build |
 
-Each deployment is fresh; no state is carried over between them.
+Each deployment is fresh; no state is carried over between them. **Retired** deployments still exist on Testnet but are not used by the backend: send nothing to them, and index only the current one. Their records are kept as `deployments/testnet.v1.*` (`CBTFO2N4…`) and `deployments/testnet.v2.*` (`CDLSGBNI…`), marked `"status": "retired"`.
 
 ## Receipt state machine
 

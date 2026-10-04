@@ -244,13 +244,15 @@ against charged fees shows nothing that affects rent was missed.
 Two deployments, both measured with `scripts/measure_costs.py`, which
 submits every transaction for real and reads back what the network charged:
 
-- **Before:** `CBTFO2N4…KECW6KU`, `data_version` 1 (named-field storage,
+- **Before:** `CBTFO2N4…KECW6KU` (now retired), `data_version` 1 (named-field storage,
   splits that retire the parent), measured 2026-10-03. Raw numbers in
   `deployments/testnet.v1.costs.json` and `testnet.v1.entries.json`.
-- **After:** `CDLSGBNI…LZJW3`, `data_version` 2 (compact storage, splits in
+- **After:** `CDLSGBNI…LZJW3` (now retired), `data_version` 2 (compact storage, splits in
   place, finished receipts skipped by the keep-alive), measured 2026-10-04.
   Raw numbers in `deployments/testnet.costs.json` and
-  `testnet.entries.json`.
+  `testnet.entries.json`. The current deployment, `CB3PY2P5…NXKYFPEM`, is
+  the same build plus a 64-byte cap on `deposit_id`, a single length check
+  that does not change these costs measurably, so it was not re-measured.
 
 Testnet's rent rate moved between the two runs, from 5,207 to 5,365 stroops
 per KB. The Testnet column is what was actually charged. The mainnet columns
