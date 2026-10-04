@@ -315,3 +315,83 @@ event it ingests (SDD §7). If it falls behind by more than the retention
 window, rebuild from contract state: `get_receipts_by_owner`,
 `get_receipts_by_warehouse`, `get_receipts_by_lender`, `get_sales_by_lender`
 and `get_unsettled_sales`, all paged at 64.
+
+## Planned for `data_version` 3: anchors and farmer proofs (not implemented)
+
+Everything in this section is **design, not code**. It describes the A+B
+storage strategy (`docs/storage-strategy.md`) and becomes binding when that
+ships. Until then the rule at the top of this file still holds: the code is
+right.
+
+### `anchored` (planned): a warehouse's day is committed
+
+| field | T | type | notes |
+|---|---|---|---|
+| warehouse_id | T | Symbol | |
+| day | | u32 | days since 1970-01-01 UTC; strictly increasing per warehouse, never after the ledger's day |
+| root | | BytesN<32> | Merkle root of the day's leaves |
+| head | | BytesN<32> | `sha256(previous head ‖ day as 4 bytes, big-endian ‖ root)`; the first head uses 32 zero bytes as the previous one |
+| leaves | | u32 | leaf count, which fixes the proof depth |
+
+The indexer requirements above apply in full: `anchored` events are the only
+permanent record of past roots.
+
+### Farmer proofs
+
+Every deposit and dispatch delivers a **proof bundle** to the farmer,
+automatically (see `docs/backend-requirements.md`). A bundle proves one
+leaf: one deposit, one dispatch, or one lot's balance at the end of one day.
+
+**Bundle contents:**
+
+| field | |
+|---|---|
+| `v` | bundle format version, 1 |
+| `network` | network passphrase |
+| `contract` | the receipt contract's id |
+| `leaf` | every field of the leaf, as specified in `docs/storage-strategy.md` (B: leaf format), including `salt` |
+| `proof` | the sibling hashes from the leaf up to the root, in order |
+
+The encoding (binary: the leaf's XDR followed by the raw proof hashes, then
+Base45 for an alphanumeric QR code) comes to about 1 KB for a warehouse of
+2,000 lots, which fits a QR code printed at about 4 cm. The exact encoding
+is fixed at implementation, and must decode with open tooling.
+
+### Verifying a proof with nothing but the bundle and the chain
+
+Anyone can do this with a public Stellar RPC endpoint and no access to
+Farmledge's API, database or website:
+
+1. **Check the contract.** It must be the published Farmledge contract,
+   with the audited Wasm hash. This is the one fact taken from outside the
+   bundle, and it is public.
+2. **Hash the leaf:** `sha256(0x00 ‖ XDR(leaf))`, where the XDR is the
+   leaf encoded as a Soroban `ScVal`. Any Stellar XDR library does this.
+   Alternatively, simulate the contract's `leaf_hash`, a free read that
+   needs no signature.
+3. **Fold the proof:** start from the leaf hash. For each sibling, if the
+   current position (`leaf.index`, halved at each level) is even, hash
+   `0x01 ‖ current ‖ sibling`, otherwise `0x01 ‖ sibling ‖ current`. The
+   result is the claimed root.
+4. **Compare with the chain:**
+   - **The leaf's day is within the last 30 days:** read the stored day root
+     for `(warehouse_id, day)` with `getLedgerEntries` and compare. Or
+     simulate the contract's `verify_leaf(leaf, proof)`. One call, free.
+   - **Older:** get the `anchored` events for that warehouse from the
+     leaf's day onwards from ledger history. Use `getEvents` within RPC
+     retention; beyond that, any full-history source (Stellar's public
+     history archives, or a public ledger data lake). Check that the
+     leaf's day carries the claimed root. Recompute the head forward through
+     every later day's root, and compare the result with the head the
+     contract stores now. The events need not be trusted: a wrong one cannot
+     reproduce the stored head.
+
+**What a valid proof shows:** this exact leaf (lot, owner, weight, grade,
+attesters) was in that warehouse's committed books for that day, and the
+books for that day cannot have been changed since. **What it does not
+show:** that the books were complete, or that the grain is physically
+there. Those rest on audits and the warehouse.
+
+A balance proof older than the latest anchor says what the lot held *then*.
+To check current holdings, ask the farmer for their latest monthly
+statement, which carries a balance proof less than 30 days old.

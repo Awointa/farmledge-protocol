@@ -33,6 +33,7 @@ assumption behind them (every deposit mints a receipt that pays rent for
 | [docs/events.md](docs/events.md) | Every event, field and type, the transition that emits it, and the indexer's correctness requirements. **The contract between protocol and backend.** |
 | [docs/archival.md](docs/archival.md) | Storage rent, the keep-alive job, the restore path, and measured costs for Testnet and mainnet |
 | [docs/storage-strategy.md](docs/storage-strategy.md) | Design evaluation, not implemented: what to keep on-chain (mint on demand, daily anchoring, aggregated lots, minimal chain), with measured costs and what each lets a lender verify |
+| [docs/backend-requirements.md](docs/backend-requirements.md) | What the backend must do for the protocol to be correct: indexer, keep-alive, and, from `data_version` 3, anchoring and farmer proof delivery |
 | [docs/upgrade.md](docs/upgrade.md) | Why the contract is immutable, and the migration path |
 | [docs/adversarial-review.md](docs/adversarial-review.md) | Every way a farmer or lender could lose what they are owed, and the test that prevents it |
 

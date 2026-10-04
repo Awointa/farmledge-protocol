@@ -184,8 +184,11 @@ Each leaf is this record:
 | kind | u32 | 0, 1 or 2 |
 | warehouse_id | Symbol | |
 | day | u32 | days since 1970-01-01, UTC |
-| index | u32 | the leaf's position in the tree |
-| deposit_id | String (≤ 64 bytes) | the lot |
+| index | u32 | the leaf's position in the tree: a position, **never an identity** |
+| deposit_no | u64 | the lot's per-warehouse number, assigned once by the database: **the lot's identity, and the key of the duplicate guard** |
+| deposit_id | String (≤ 64 bytes) | the lot's human reference |
+| receipt_id | u64 | the on-chain receipt that now governs the lot, or 0 if none |
+| receipt_version | u32 | which contract `receipt_id` belongs to: 2 (the current contract, during cutover) or 3; 0 if none |
 | owner | Address | |
 | commodity, grade | Symbol | |
 | kg | u64 | deposited, dispatched or remaining |
@@ -380,6 +383,72 @@ by leaf. The cost difference is negligible.
   survive. Everything else, including who owns what and who bought a lot
   in recovery, survives only as proofs in farmers' and lenders' hands.
 
+## Audit of A+B: what every check is keyed on
+
+Written before any A+B code, after the D prototype turned out to let one lot
+be pledged twice through two days' leaves. The question for every check:
+**does it rest on a stable identifier, or on something that changes over
+time** (a daily leaf, a root, a day number, a timestamp, a caller-supplied
+value nothing binds)? Every check is listed, sound or not.
+
+The rule that comes out of it: **identity and quantity come only from the
+proven leaf, and uniqueness is keyed only on the lot's stable identity
+`(warehouse_id, deposit_no)`, never on a leaf hash, leaf index, day or
+root.**
+
+### Minting on demand: the deposit guard and the proof
+
+| # | check | keyed on | stable? | verdict |
+|---|---|---|---|---|
+| A1 | **Deposit guard under A**: a lot can be minted once | prototype: `warehouse_id` and `deposit_no` passed as **separate arguments**, unrelated to anything proven | the number is stable, but **nothing binds it to the lot** | **Flaw, D's class.** Whoever holds the custodian and verifier keys (Farmledge in Phase 1) could mint the same proven lot twice under two numbers. Unlike D, the key is not time-varying; but it is not the lot's identity either. **Fix:** the guard key is `(leaf.warehouse_id, leaf.deposit_no)`, read from the proven leaf, with no separate arguments. The same lot then maps to the same bit on every day, through every leaf, root and index. |
+| A2 | One physical lot has one `deposit_no` | the database's sequence | stable, but off-chain | **Sound, with stated trust.** The contract can only enforce "each number mints once". That a lot was not given two numbers at intake is the backend's guarantee, as today's client-chosen `deposit_id` is. It is checkable: each day's tree holds one deposit leaf per number, and the numbers are contiguous. |
+| A3 | The guard survives time | persistent bitmap entries | stable | **Sound, and must stay so.** An archived chunk is restored when a mint reads it, so the guard still holds. It must **never** move to temporary storage: expiry would delete it and reopen every number in the chunk. A test pins this. |
+| A4 | Which chunk a number lives in | `deposit_no / 1024` | stable | Sound. |
+| A5 | Which kind of leaf may mint | prototype: **any kind** | **time-varying.** A deposit leaf (kind 0) records the intake weight, which later dispatches reduce | **Flaw.** A lot deposited at 2,000 kg and since drawn down to 500 could be minted at 2,000 from its old deposit leaf. **Fix:** only balance leaves (kind 2) can mint. |
+| A6 | How recent the leaf must be | prototype: **any day whose root is still stored** (30 days) | **time-varying** | **Flaw.** A balance leaf from before a dispatch overstates what the lot holds now. **Fix:** `leaf.day` must equal the warehouse's latest anchored day. The window that is left (dispatches since that anchor, at most a day) is closed by procedure: a mint is co-signed by a custodian and verifier attesting the lot as it is now, and the backend freezes off-chain dispatch of a lot with a mint pending. |
+| A7 | No uniqueness check uses a leaf, index, day or root | — | — | **Holds once A1 is fixed.** This is exactly D's bug: D keyed its guard on (warehouse, day, leaf index). |
+| A8 | The receipt's contents | prototype: owner, warehouse, commodity, grade, kg, bags, moisture **passed as arguments**, with no proof at all | caller-supplied | **Flaw.** With a proof added but fields still passed separately, the proof would check one leaf while the receipt was written from other values. **Fix:** every field of the minted receipt is taken from the proven leaf, including its original custodian and verifier, which record who attested the intake. The only arguments are the leaf, the proof and the signers at mint time. |
+| A9 | Which root a proof is checked against | `(leaf.warehouse_id, leaf.day)`, from the leaf itself | stable once A6 fixes the day | Sound. The position comes from `leaf.index`, which is only ever a position. |
+| A10 | A node cannot pose as a leaf | domain separation: `0x00` for leaves, `0x01` for nodes | — | **Sound.** Defence in depth: also require the proof's length to match the depth implied by that day's stored leaf count. |
+
+### Anchoring
+
+| # | check | keyed on | stable? | verdict |
+|---|---|---|---|---|
+| A11 | Days are anchored in order | prototype: rejects a day ≤ the last one, **except** when the last one is day 0, and has **no upper bound** | time, uncontrolled | **Flaw.** Day 0 can be re-anchored repeatedly. A far-future day can be anchored, after which no real day can be, and A6 would point every mint at the fake day. **Fix:** track "no anchor yet" explicitly (not as day 0), and require `last day < day ≤ the ledger's current day` (ledger timestamp ÷ 86,400). Ledger time is consensus time, the right clock. |
+| A12 | A day's root cannot be replaced | strict ordering (A11) | stable | **Sound once A11 is fixed.** Replacing a root would keep proofs alive for lots since dispatched, or rewrite the books. |
+| A13 | Who may anchor | a custodian registered for that warehouse, now | the registry | **Sound.** Removing a custodian stops their future anchors; past anchors stand. Trust: in Phase 1 the custodian key is Farmledge's, so an anchor is Farmledge's statement. What the chain adds is that it **cannot be rewritten later**. |
+| A14 | Ordering survives time | the head is a persistent entry | stable | **Sound, and must stay so.** An archived head is restored on read, so ordering holds. In temporary storage, expiry would reset ordering and allow old days to be re-anchored. |
+| A15 | The day root expiring | temporary storage, 30 days | time-varying, deliberately | **Sound.** Only which day can be proven on-chain depends on it. With A6, mints only ever use the latest root. No uniqueness depends on it. |
+| A16 | The hash chain commits to the day | `head = sha256(previous head ‖ day ‖ root)` | stable | Sound. |
+
+### After mint, and across the cutover
+
+| # | check | keyed on | stable? | verdict |
+|---|---|---|---|---|
+| A17 | Lock, unlock, extend_due, recovery, settlement, exit, revoke | the receipt id; the lender recorded in the lock; registries | stable | **Sound.** Unchanged from `data_version` 2 and covered by `docs/adversarial-review.md`. |
+| A18 | No double pledge of a minted receipt | receipt status (`Active` only) and receipt id | stable | **Sound.** The only way to pledge one lot twice is a second receipt for it, which A1, A5, A6 and A19 close. |
+| A19 | A lot already held as a current-contract receipt | **nothing**: v3's bitmap does not know the current contract's `DepositIndex` (different ids) | — | **Flaw at cutover.** Those lots appear in v3's first balance leaves, so the same grain could be minted on v3 and pledged on both contracts. **Fix:** before v3 accepts any mint, the admin pre-claims those lots' deposit numbers in v3's bitmap (an on-chain, checkable list), and their balance leaves carry the current-contract receipt id in `receipt_id`. |
+| A20 | A minted lot's later life stays on-chain | backend routing | procedure | **Not a contract check, and not preventable on-chain.** Once minted, the receipt governs the lot, and its dispatches must go through `exit`. Its balance leaves keep appearing, with `receipt_id` set, so auditors don't count it twice. If the backend dispatched it off-chain, the anchors would show less than the receipt: detectable, so it must raise an alert. |
+| A21 | Due dates and recovery timing | the ledger timestamp against stored dates | consensus time | Sound. |
+
+**Result:** six flaws (A1, A5, A6, A8, A11, A19), all in the prototype's
+shape or the cutover, none in the current contract. Three (A1, A5, A6) are
+D's class: a lot's identity or quantity taken from something unbound or
+time-varying instead of the proven leaf. Each fix becomes a named regression
+test before the code that satisfies it. The other fifteen checks are sound
+as designed, three of them (A3, A14, A20) only as long as the stated rule is
+kept.
+
+## Farmer proof delivery: a requirement
+
+Every deposit and dispatch hands the farmer their leaf, salt and inclusion
+proof **automatically**, not on request. Without that, unpledged inventory
+is provable only through Farmledge, which defeats the point of anchoring.
+The bundle format and how a third party verifies one with nothing but the
+bundle and the chain are in `docs/events.md` ("Farmer proofs"); delivery
+obligations and alerts are in `docs/backend-requirements.md`.
+
 ## Recommendation
 
 **Build A+B.** It means:
@@ -416,10 +485,109 @@ If revenue cannot carry A+B at that rate, D is the honest fallback, and the
 lender-facing terms should then say plainly that collateral custody after
 the pledge rests on Farmledge and the warehouse, not on the chain.
 
-**Whatever is chosen, the farmer must hold their own proofs.** Every
-deposit and dispatch should hand the farmer their leaf, salt and proof (an
-SMS link or a PDF). Without that, "provable without Farmledge" is true only
-in principle.
+**The farmer must hold their own proofs.** This is a requirement, not an
+option. See [Farmer proof delivery](#farmer-proof-delivery-a-requirement).
+
+## Implementation plan for A+B (for review)
+
+**Not started.** Nothing below is implemented until this plan is approved.
+
+### Contract: `data_version` 3
+
+A new deployment built from the current code. The current contract is
+immutable and keeps running.
+
+1. **Anchoring.** `anchor(custodian, warehouse_id, day, root, leaves)`:
+   - a custodian registered for the warehouse signs (A13);
+   - `last day < day ≤ ledger day`, with "never anchored" tracked explicitly
+     rather than as day 0 (A11, A12);
+   - the head goes in persistent storage and the day root in temporary
+     storage for 30 days (A14, A15);
+   - `head = sha256(prev ‖ day ‖ root)` (A16), and it emits `anchored`.
+2. **Mint on demand.** `mint_from_anchor(custodian, verifier, leaf, proof)`
+   replaces `mint`:
+   - the leaf must be a balance leaf (A5) from the warehouse's latest
+     anchored day (A6);
+   - the proof's length matches the day's depth, and it folds to that day's
+     root (A9, A10);
+   - the guard claims the bit for `(leaf.warehouse_id, leaf.deposit_no)` in a
+     persistent bitmap (A1, A3, A4, A7);
+   - every receipt field is copied from the leaf (A8);
+   - a custodian and verifier sign at mint time.
+3. **Pre-claim for cutover** (A19). `preclaim(warehouse_id, deposit_nos)`:
+   admin only, at most 25 numbers per call, and it fails on any number
+   already claimed. It emits one event per number, so the list is public and
+   checkable.
+4. **Reads:** `leaf_hash(leaf)` and `verify_leaf(leaf, proof)`, free to
+   simulate, for verifiers who do not want to implement the hashing.
+5. **Removed:** `mint` and the `DepositIndex` guard (`extend_ttl_batch` no
+   longer bumps it). The bitmap is never kept alive, because an archived
+   chunk is restored when it is read.
+6. **Receipt layout:** gains `deposit_no`, the link back to the anchored
+   leaves. `DATA_VERSION` becomes 3. Everything else is unchanged: lock,
+   unlock, extend_due, recovery, settlement, exit, revoke, in-place splits,
+   the compact layout, the 64-byte caps, the keep-alive skip.
+7. **New errors:** `WrongLeafKind`, `StaleLeaf`, `InvalidProof`, `NoAnchor`,
+   `AnchorOutOfOrder`, `AnchorInFuture`. A repeat claim keeps
+   `DuplicateDepositId`.
+8. **Tests first:**
+   - one named regression test per audit finding;
+   - a stateful property test over random anchors, mints, exits and
+     pledges: never two receipts for one `(warehouse_id, deposit_no)`, never
+     a mint above the latest anchored balance, anchors always strictly
+     ordered and never ahead of the ledger;
+   - mutation testing over the new code.
+9. **Then:** deploy to Testnet, extend `scripts/measure_costs.py` to cover
+   anchors and minting on demand, and confirm the costs in this document
+   with v3's own fees. **An external audit before mainnet:** the proof
+   check, the guard and the anchor ordering are new security-critical code.
+
+### Backend
+
+All of it is in `docs/backend-requirements.md` (items 3–6):
+
+- **Postgres** becomes the system of record for unpledged lots: deposits
+  with per-warehouse `deposit_no` sequences, dispatches, end-of-day
+  balances, and every leaf, salt, tree and proof.
+- **The anchoring job,** daily per warehouse. It confirms each anchor
+  on-chain and alerts on a missed cutoff.
+- **Proof delivery:** a QR code on the counter slip; the SMS bundle within
+  24 hours of the anchor; monthly balance statements; a static verifier page
+  that checks proofs against a public RPC; delivery receipts and alerts. An
+  open-source standalone verifier is published with the bundle spec.
+- **Pledge flow:** freeze off-chain dispatch of the lot, mint from its
+  latest balance proof, then lock. Once minted, the lot only exits
+  on-chain. An alert fires if its anchored balance and the receipt ever
+  disagree.
+- **Indexer and keep-alive:** the indexer covers the new events; the
+  keep-alive job covers both contracts.
+
+### Cutover, by date
+
+Mainnet has not launched, so **mainnet starts directly on `data_version`
+3**. The cutover below is for Testnet and pilot data.
+
+1. **Shadow period, at least two weeks.** v3 runs on Testnet alongside the
+   current contract, anchoring daily with no mints, while deposits still
+   mint on the current contract. The anchoring job, proof delivery and the
+   verifier are exercised end to end. Exit criteria: no missed anchors,
+   every bundle delivered within 24 hours, and every bundle verified by the
+   standalone verifier.
+2. **Choose cutover day X:** a 00:00 UTC cutoff after the shadow period
+   meets its criteria, announced in advance.
+3. **On X − 1:**
+   - stop minting on the current contract at the cutoff;
+   - pre-claim, on v3, the deposit numbers of every lot still held as a
+     current-contract receipt;
+   - publish that list.
+4. **From X:**
+   - new deposits are database-only and anchored daily;
+   - a pledge mints on v3;
+   - lots held as current-contract receipts stay there until they exit,
+     and appear in v3's balance leaves with `receipt_version` 2;
+   - the keep-alive job covers both contracts.
+5. **When the last current-contract receipt exits,** mark that contract
+   retired, as earlier deployments were.
 
 ## Migration path
 
@@ -451,10 +619,11 @@ deployment alongside it, not an upgrade.
    because they are already paid for. The keep-alive job runs for both
    contracts until the last current-contract receipt exits. Then the current
    contract is marked retired and left to archive.
-5. **Reconcile once:** at cutover, the first v3 anchor of each warehouse
-   includes balance leaves for lots still held as current-contract receipts,
-   flagged as such. That puts the whole stock under one daily commitment
-   from day one.
+5. **Reconcile once:** before v3 accepts a mint, the deposit numbers of lots
+   still held as current-contract receipts are pre-claimed on v3 (audit
+   finding A19), and v3's first anchor of each warehouse includes their
+   balance leaves with `receipt_version` 2. That puts the whole stock under
+   one daily commitment from day one, without any lot being mintable twice.
 
 Nothing in this path touches existing receipts or their owners, and nothing
 needs rolling back: if v3 is abandoned, the current contract is still
