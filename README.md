@@ -23,7 +23,8 @@ minting a receipt only when it is first pledged (about 30% of deposits),
 anchoring the inventory layer with a daily Merkle root instead of a receipt
 per deposit, and aggregating entries per farmer and commodity. Together they
 could cut rent by roughly 90%. **Treat the current per-deposit mint, and the
-costs that follow from it, as provisional, not settled.** Today's costs, and the
+costs that follow from it, as provisional, not settled.** The evaluation, with
+measured costs, is in [docs/storage-strategy.md](docs/storage-strategy.md). Today's costs, and the
 assumption behind them (every deposit mints a receipt that pays rent for
 9–12 months), are in [docs/archival.md](docs/archival.md).
 
@@ -31,6 +32,7 @@ assumption behind them (every deposit mints a receipt that pays rent for
 |---|---|
 | [docs/events.md](docs/events.md) | Every event, field and type, the transition that emits it, and the indexer's correctness requirements. **The contract between protocol and backend.** |
 | [docs/archival.md](docs/archival.md) | Storage rent, the keep-alive job, the restore path, and measured costs for Testnet and mainnet |
+| [docs/storage-strategy.md](docs/storage-strategy.md) | Design evaluation, not implemented: what to keep on-chain (mint on demand, daily anchoring, aggregated lots, minimal chain), with measured costs and what each lets a lender verify |
 | [docs/upgrade.md](docs/upgrade.md) | Why the contract is immutable, and the migration path |
 | [docs/adversarial-review.md](docs/adversarial-review.md) | Every way a farmer or lender could lose what they are owed, and the test that prevents it |
 
