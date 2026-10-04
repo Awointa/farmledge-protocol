@@ -37,7 +37,8 @@ source of truth for the backend.
 
 | Network | Contract ID | Notes |
 |---|---|---|
-| Testnet | `CBTFO2N4A7ILUX6H72FFZOGWF62ZCAKB4I6X6CI52Q2522DVNKECW6KU` | **Current.** Immutable build with a constructor, `data_version` 1, batched keep-alive, `get_sales_by_lender`, and self-contained `split` / `ttl_extended` / registry events. Deployed 2026-10-01 |
+| Testnet | `CDLSGBNISQ7F3ROSEE5MHAZEZYNUV5LOGQA2EWTP4BPODLQT4G2LZJW3` | **Current.** `data_version` 2: compact storage, splits in place, finished receipts left to archive, 64-byte ref caps. Deployed 2026-10-03 |
+| Testnet | `CBTFO2N4A7ILUX6H72FFZOGWF62ZCAKB4I6X6CI52Q2522DVNKECW6KU` | Superseded 2026-10-03. Immutable build with a constructor, `data_version` 1, batched keep-alive, `get_sales_by_lender`, and self-contained `split` / `ttl_extended` / registry events |
 | Testnet | `CCHVG565ABRRCZCVBZLO3FM42EILZXQMT62HKRT7DMGJUATOJSVQZ7RB` | Superseded 2026-10-01. Lending lifecycle with sale records |
 | Testnet | `CAZJUMEN2JMUT7HUNRUXC6ABSX5M2UOZ3RIBJPRYATHIA7L2QOUHKTET` | Superseded 2026-09-30. First lending build |
 
@@ -238,7 +239,7 @@ file (format in the script header), and writes `deployments/testnet.json`.
 {"network":"testnet","network_passphrase":"Test SDF Network ; September 2015",
  "rpc_url":"https://soroban-testnet.stellar.org/","contract_id":"C…",
  "wasm_hash":"…","admin":"G…","deployer":"G…","start_ledger":4971770,
- "data_version":1,"git_commit":"…","deployed_at":"2026-10-01T19:20:54Z"}
+ "data_version":2,"git_commit":"…","deployed_at":"2026-10-03T23:11:50Z"}
 ```
 
 so `CONTRACT_ID=$(scripts/deploy.sh | jq -r .contract_id)` works.

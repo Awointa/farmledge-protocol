@@ -6,8 +6,9 @@ are not deleted. Since protocol 23 they are restorable at any time. But until
 someone pays to restore one, a transaction that touches it pays for the
 restore, and an RPC read has to go through the restore path. This document
 covers the TTL policy, the keep-alive job the backend must run, the restore
-path, what each operation costs (measured on Testnet, converted to mainnet),
-the recommended renewal strategy, and two proposals for cutting rent.
+path, what each operation costs (measured on Testnet, converted to mainnet)
+before and after the `data_version` 2 changes, the renewal cadence, and the
+monthly and per-deposit cost.
 
 ## The TTL policy
 
@@ -34,9 +35,9 @@ transaction's base resource fee (measured below).
 
 | entry | refreshed by |
 |---|---|
-| `Receipt(id)` | every write to that receipt (lock, unlock, exit, split, extend_due, recovery), `extend_ttl`, `extend_ttl_batch` |
-| `DepositIndex(deposit_id)`: the duplicate-mint guard | mint, `extend_ttl`, `extend_ttl_batch` (alongside its receipt) |
-| `Sale(id)` | complete_recovery, record_settlement, and `extend_ttl(_batch)` on any receipt whose history names it, including every split descendant |
+| `Receipt(id)` | every write to that receipt (lock, unlock, exit, split, extend_due, recovery), and `extend_ttl` / `extend_ttl_batch` **unless it is `Exited` or `Revoked`**. Those are left to archive. |
+| `DepositIndex(deposit_id)`: the duplicate-mint guard | mint, and `extend_ttl` / `extend_ttl_batch` on any live receipt of that deposit. Once every receipt of a deposit has finished, the guard archives too. It still blocks a duplicate mint, because the mint reads it and that restores it (`ttl::an_archived_deposit_guard_still_blocks_a_duplicate_mint`). |
+| `Sale(id)` | complete_recovery, record_settlement, and `extend_ttl(_batch)` on any live receipt whose history names it. If every such receipt has finished before the bank settles, `record_settlement` restores the sale, at the caller's cost. |
 | `UnsettledSales` | complete_recovery, record_settlement, every `extend_ttl(_batch)` |
 | owner / warehouse / lender / lender-sale **index pages** and their page counters | appending to the page while it is filling. **A full page (64 ids) is never written again.** It is kept alive only by `extend_index_ttl`. |
 | registry entries (warehouse, custodian, verifier, operator) | being added, and every time they are checked (mint, exit, complete_recovery, record_settlement). An idle warehouse's registration can archive. That is harmless: the next mint restores it automatically. |
@@ -60,8 +61,12 @@ has been failing for two weeks.
 **Each run:**
 
 1. **Receipts.** Take every receipt the indexer has in `Active`, `Locked` or
-   `Recovery`. Terminal receipts (`Exited`, `Revoked`, `Split`) are audit
-   records. They may archive, and they restore on demand.
+   `Recovery`. **Never send `Exited` or `Revoked` ids.** Nothing can act on
+   them again, so they are left to archive, and the indexer's event archive
+   is their permanent record. The contract skips them anyway, but once one
+   has archived, naming it makes the transaction restore it, paying the
+   network's minimum TTL in rent (120 days on mainnet), only for it to be
+   skipped.
 2. **Read their TTLs** with RPC `getLedgerEntries` (up to 200 keys per
    request), or `stellar contract read --key-xdr …`, whose last column is the
    `live_until_ledger`. Keep only those with
@@ -108,9 +113,9 @@ Since protocol 23, `simulateTransaction` marks archived entries in the
 footprint for automatic restoration, and the assembled transaction (JS SDK
 `prepareTransaction` / `assembleTransaction`, or `stellar contract invoke`)
 restores them as part of the call. The caller pays the restore: rent for
-the minimum TTL, plus a write. For a 912-byte receipt that is about 0.15
-XLM on mainnet today (120 days at 1,000/KB), or about 0.05 on Testnet
-(7 days at 5,207/KB). Any business call works this way, including
+the minimum TTL, plus a write. For a 432-byte receipt that is about 0.07
+XLM on mainnet today (120 days at 1,000/KB), or about 0.02 on Testnet
+(7 days at 5,365/KB). Any business call works this way, including
 `extend_ttl(receipt_id)`, which is also the cheapest because it restores
 **and** extends in one transaction. The contract's own test host behaves the
 same way (`ttl::an_archived_receipt_is_restored_intact_and_needs_extending_again`):
@@ -201,6 +206,9 @@ end soon. At the 3 GB target the rate is 10,000 per KB, about 10× today and
 about 2× Testnet. **Budget with the "mainnet at 10,000/KB" column as the
 planning case, and the "mainnet today" column as the current spend.**
 
+Rechecked on 2026-10-04: Testnet's rate had risen to 5,365, and mainnet,
+still on the floor, held 1.78 GB of state, up 0.1 GB in a day.
+
 Testnet numbers must never be quoted as mainnet cost. Today they overstate
 rent about 5×, and they could understate it later.
 
@@ -219,93 +227,136 @@ same rate. The settings were fetched with stellar-cli 27 against protocol 29
 networks. The CLI warns that it may miss newer settings, but the 0.1% match
 against charged fees shows nothing that affects rent was missed.
 
-## Measured cost per operation
+## Measured cost per operation, before and after
 
-Network: Testnet, contract `CBTFO2N4…KECW6KU`, all transactions from one run
-of `scripts/measure_costs.py` on 2026-10-03, which submits every one of them
-for real and reads back what the network charged. The raw numbers are in
-`deployments/testnet.costs.json` and `deployments/testnet.entries.json`. 1 XLM
-= 10,000,000 stroops.
+Two deployments, both measured with `scripts/measure_costs.py`, which
+submits every transaction for real and reads back what the network charged:
 
-| operation | Testnet fee (XLM) | of which rent | mainnet today (XLM) | mainnet at 10,000/KB | CPU instr. | write B | footprint RO / RW | events B | tx |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| mint — farmer's first receipt (creates owner index) | 1.7167 | 1.7127 | 0.3330 | 3.2932 | 2,374,182 | 1,992 | 5 / 8 | 584 | `ac2d02251b94` |
-| mint — farmer's later receipt | 1.3465 | 1.3424 | 0.2619 | 2.5821 | 2,482,196 | 2,604 | 5 / 8 | 584 | `5642b72d89b9` |
-| lock — full | 0.2253 | 0.2229 | 0.0452 | 0.4305 | 1,808,233 | 1,684 | 3 / 4 | 384 | `3b82d15bb0da` |
-| lock — partial (splits) | 2.6185 | 2.6134 | 0.5070 | 5.0241 | 3,557,584 | 5,124 | 2 / 11 | 888 | `f835f5fcc67c` |
-| exit — full | 0.0222 | 0.0205 | 0.0057 | 0.0411 | 1,566,873 | 1,012 | 4 / 2 | 364 | `386fb62d741f` |
-| exit — partial (splits) | 2.4154 | 2.4110 | 0.4674 | 4.6347 | 3,293,943 | 4,480 | 3 / 9 | 868 | `edac10374fb8` |
-| extend_due | 0.0010 | 0.0000 | 0.0010 | 0.0010 | 985,450 | 1,084 | 2 / 1 | 424 | `cef26191debf` |
-| unlock — partial (splits) | 2.6326 | 2.6281 | 0.5091 | 5.0517 | 3,243,351 | 5,340 | 1 / 10 | 984 | `faa6e1ace3cc` |
-| extend_ttl — 1 receipt, TTL above threshold (no-op bump) | 0.0006 | 0.0000 | 0.0006 | 0.0006 | 887,851 | 0 | 5 / 0 | 284 | `eee254bee101` |
-| extend_ttl_batch — 25 receipts, TTL above threshold | 0.0066 | 0.0000 | 0.0066 | 0.0066 | 8,848,763 | 0 | 53 / 0 | 7,100 | `8cdc2d3470f1` |
-| extend_index_ttl — 2 pages | 0.0005 | 0.0000 | 0.0005 | 0.0005 | 816,338 | 0 | 5 / 0 | 0 | `bf404ac9136f` |
-| native extend — 1 receipt, +1 day (to 176 days) | 0.0071 | 0.0069 | 0.0016 | 0.0135 | 0 | 0 | 1 / 0 | 0 | `a8fd54fd90ec` |
-| native extend — 1 receipt, +5 days (to 180-day ceiling) | 0.0336 | 0.0334 | 0.0067 | 0.0644 | 0 | 0 | 1 / 0 | 0 | `a7d66f30fceb` |
-| native extend — 25 receipts + deposit guards, to 180-day ceiling | 0.9583 | 0.9561 | 0.1859 | 1.8384 | 0 | 0 | 50 / 0 | 0 | `f00ed6b9b64f` |
-| start_recovery | 0.4113 | 0.4103 | 0.0798 | 0.7889 | 1,008,562 | 1,400 | 2 / 1 | 372 | `b4ce3d7391b3` |
-| complete_recovery | 1.8642 | 1.8601 | 0.3614 | 3.5764 | 2,477,173 | 3,084 | 3 / 9 | 556 | `20caf89faae5` |
-| record_settlement | 0.0277 | 0.0256 | 0.0070 | 0.0512 | 1,605,243 | 892 | 4 / 3 | 568 | `ea7f33b81f9c` |
-| unlock — full | 0.0009 | 0.0000 | 0.0009 | 0.0009 | 978,145 | 920 | 2 / 1 | 380 | `d8dfbda0789c` |
+- **Before:** `CBTFO2N4…KECW6KU`, `data_version` 1 (named-field storage,
+  splits that retire the parent), measured 2026-10-03. Raw numbers in
+  `deployments/testnet.v1.costs.json` and `testnet.v1.entries.json`.
+- **After:** `CDLSGBNI…LZJW3`, `data_version` 2 (compact storage, splits in
+  place, finished receipts skipped by the keep-alive), measured 2026-10-04.
+  Raw numbers in `deployments/testnet.costs.json` and
+  `testnet.entries.json`.
 
-What the table says:
+Testnet's rent rate moved between the two runs, from 5,207 to 5,365 stroops
+per KB. The Testnet column is what was actually charged. The mainnet columns
+rescale each run's rent from the Testnet rate it was charged at, so they
+compare like with like. All figures are XLM (1 XLM = 10,000,000 stroops), and
+"change" is for mainnet today.
 
-- **Rent is almost the whole fee.** Every write that creates an entry pays
-  for its first 175 days up front. A mint creates a receipt, a deposit guard,
-  and sometimes index pages. Everything else (CPU, I/O, events) is
-  thousandths of an XLM.
-- **A partial operation costs about 12× its full counterpart for a lock and
-  about 110× for an exit**, because it creates two new receipts and appends
-  to four index pages. A full exit creates nothing. See the in-place split
-  proposal below.
-- **Keep-alive calls on healthy entries are nearly free.**
-  `extend_ttl_batch` on 25 receipts whose TTL is above the threshold costs
-  0.0066 XLM on either network. That is the daily job's cost on a quiet day.
-  It used 53 of 400 footprint entries and 7,100 of 16,384 event bytes.
-- `extend_due`, the full `unlock` and `start_recovery` mostly rewrite
-  entries in place, so they pay little rent. `start_recovery` grows the
-  receipt by the `Recovery` record, and the extra bytes pay rent for the
-  receipt's remaining TTL.
+| operation | Testnet before → after | mainnet today before → after | mainnet at 10,000/KB before → after | change |
+|---|---:|---:|---:|---:|
+| mint — farmer's first receipt (creates owner index) | 1.7167 → 1.1445 | 0.3330 → 0.2166 | 3.2932 → 2.1297 | -35% |
+| mint — farmer's later receipt | 1.3465 → 0.7624 | 0.2619 → 0.1454 | 2.5821 → 1.4176 | -44% |
+| lock — full | 0.2253 → 0.1436 | 0.0452 → 0.0286 | 0.4305 → 0.2657 | -37% |
+| lock — partial (splits) | 2.6185 → 0.7522 | 0.5070 → 0.1439 | 5.0241 → 1.3981 | -72% |
+| exit — full | 0.0222 → 0.0228 | 0.0057 → 0.0056 | 0.0411 → 0.0411 | -1% |
+| exit — partial (splits) | 2.4154 → 0.6314 | 0.4674 → 0.1208 | 4.6347 → 1.1735 | -74% |
+| extend_due | 0.0010 → 0.0009 | 0.0010 → 0.0009 | 0.0010 → 0.0009 | -5% |
+| unlock — partial (splits) | 2.6326 → 0.6258 | 0.5091 → 0.1198 | 5.0517 → 1.1631 | -76% |
+| unlock — full | 0.0009 → 0.0009 | 0.0009 → 0.0009 | 0.0009 → 0.0009 | -5% |
+| start_recovery | 0.4113 → 0.1992 | 0.0798 → 0.0379 | 0.7889 → 0.3705 | -53% |
+| complete_recovery | 1.8642 → 1.5345 | 0.3614 → 0.2893 | 3.5764 → 2.8567 | -20% |
+| record_settlement | 0.0277 → 0.0284 | 0.0070 → 0.0070 | 0.0512 → 0.0512 | -0% |
+| extend_ttl — 1 receipt, TTL above threshold (no-op bump) | 0.0006 → 0.0006 | 0.0006 → 0.0006 | 0.0006 → 0.0006 | -0% |
+| extend_ttl_batch — 25 receipts, TTL above threshold | 0.0066 → 0.0065 | 0.0066 → 0.0065 | 0.0066 → 0.0065 | -1% |
+| extend_ttl_batch — 2 Exited receipts (skipped) | — → 0.0005 | — → 0.0005 | — → 0.0005 | new |
+| extend_index_ttl — 2 pages | 0.0005 → 0.0005 | 0.0005 → 0.0005 | 0.0005 → 0.0005 | +0% |
+| native extend — 1 receipt, +1 day (to 176 days) | 0.0071 → 0.0038 | 0.0016 → 0.0009 | 0.0135 → 0.0068 | -43% |
+| native extend — 1 receipt, +5 days (to 180-day ceiling) | 0.0336 → 0.0168 | 0.0067 → 0.0033 | 0.0644 → 0.0310 | -50% |
+| native extend — 25 receipts + deposit guards, to 180-day ceiling | 0.9583 → 0.5395 | 0.1859 → 0.1024 | 1.8384 → 1.0037 | -45% |
+
+What changed and why:
+
+- **Partial operations cost 72–76% less.** They now write one new receipt
+  instead of two, and the receipt is half the size. A partial lock went from
+  about 12× a full lock to 5×, and a partial exit from about 110× a full exit
+  to 28×. It still creates a receipt, which a full exit does not.
+- **A mint costs 44% less**, because the receipt it creates is 53% smaller.
+  The deposit guard and index pages it also writes did not change.
+- **`complete_recovery` saves only 20%.** Most of its cost is entries that
+  did not shrink: the new `Sale` (smaller, but new), the lender-sale and
+  buyer index pages, and `UnsettledSales`.
+- Operations that rewrite entries in place (`exit` in full, `extend_due`,
+  `unlock` in full, `record_settlement`) were already almost rent-free, and
+  stay the same.
+- **A keep-alive call naming finished receipts is a no-op.** The new
+  `extend_ttl_batch — 2 Exited receipts (skipped)` row bumped nothing and
+  emitted no events.
+
+The after-run in raw stroops, with the resources each transaction declared:
+
+| operation | fee (stroops) | of which rent | CPU instr. | write B | footprint RO / RW | events B | tx |
+|---|---:|---:|---:|---:|---:|---:|---|
+| mint — farmer's first receipt (creates owner index) | 11,444,574 | 11,404,321 | 2,369,820 | 1,836 | 5 / 8 | 584 | `030ef9239d30` |
+| mint — farmer's later receipt | 7,624,329 | 7,583,957 | 2,436,305 | 1,920 | 5 / 8 | 584 | `8d5030da513d` |
+| lock — full | 1,436,141 | 1,413,069 | 1,696,867 | 944 | 3 / 4 | 384 | `5982e7307534` |
+| lock — partial (splits) | 7,521,509 | 7,476,376 | 2,692,155 | 2,756 | 2 / 10 | 888 | `352136e10b69` |
+| exit — full | 228,310 | 211,688 | 1,473,120 | 524 | 4 / 2 | 364 | `38debeda987f` |
+| exit — partial (splits) | 6,313,674 | 6,274,988 | 2,459,932 | 2,348 | 3 / 8 | 868 | `ce6942a21fcc` |
+| extend_due | 9,279 | 0 | 886,367 | 536 | 2 / 1 | 424 | `4165a2f158a3` |
+| unlock — partial (splits) | 6,257,777 | 6,219,546 | 2,151,680 | 2,748 | 1 / 9 | 984 | `944ccbcc3ee0` |
+| unlock — full | 8,985 | 0 | 884,048 | 440 | 2 / 1 | 380 | `e443a7aed077` |
+| start_recovery | 1,991,767 | 1,982,687 | 888,093 | 680 | 2 / 1 | 372 | `bc016e0ebffc` |
+| complete_recovery | 15,344,999 | 15,304,455 | 2,342,249 | 2,128 | 3 / 9 | 556 | `722c758d37ac` |
+| record_settlement | 284,132 | 263,557 | 1,570,592 | 596 | 4 / 3 | 568 | `e187806e16f3` |
+| extend_ttl — 1 receipt, TTL above threshold (no-op bump) | 5,962 | 0 | 875,385 | 0 | 5 / 0 | 284 | `0c4174e6ec6a` |
+| extend_ttl_batch — 25 receipts, TTL above threshold | 65,036 | 0 | 7,795,465 | 0 | 53 / 0 | 7,100 | `822598197e12` |
+| extend_ttl_batch — 2 Exited receipts (skipped) | 4,640 | 0 | 866,294 | 0 | 5 / 0 | 0 | `3e5305f146a8` |
+| extend_index_ttl — 2 pages | 5,393 | 0 | 819,473 | 0 | 5 / 0 | 0 | `6984641d6b34` |
+| native extend — 1 receipt, +1 day (to 176 days) | 37,579 | 35,085 | 0 | 0 | 1 / 0 | 0 | `142e692c7816` |
+| native extend — 1 receipt, +5 days (to 180-day ceiling) | 167,647 | 165,153 | 0 | 0 | 1 / 0 | 0 | `87fa07845235` |
+| native extend — 25 receipts + deposit guards, to 180-day ceiling | 5,395,033 | 5,372,499 | 0 | 0 | 50 / 0 | 0 | `2bdfcb9a4d31` |
+
+The rent formula still matches what was charged within 0.1%, using
+Testnet's rate on the day (165,001 stroops predicted vs 165,153 charged for
+the +5-day extend).
 
 ### Stored entry sizes
 
 Size as rent is charged on it: the full `LedgerEntry` XDR, read back from
 Testnet with `getLedgerEntries`.
 
-| entry | bytes |
-|---|---:|
-| Receipt — Active, freshly minted | 912 |
-| DepositIndex | 124 |
-| Receipt — Locked | 1,076 |
-| Receipt — Active, split child | 920 |
-| OwnerIndex page 0 | 920 |
-| Receipt — after a completed recovery | 1,312 |
-| Sale — settled | 712 |
+| entry | before (B) | after (B) | change |
+|---|---:|---:|---:|
+| Receipt — Active, freshly minted | 912 | 432 | -53% |
+| DepositIndex | 124 | 124 | +0% |
+| Receipt — Locked | 1,076 | 528 | -51% |
+| Receipt — Active, reduced in place by a split (before: split child) | 920 | 432 | -53% |
+| OwnerIndex page 0 | 920 | 800 | -13% |
+| Receipt — after a completed recovery | 1,312 | 652 | -50% |
+| Sale — settled | 712 | 416 | -42% |
+| Receipt — Exited, split off | — | 456 |  |
 
-A receipt starts at 912 bytes and grows as it picks up a `Lock` (+164), a
-`Recovery` and a recovery-history record (1,312 after one completed
-recovery). Each split child copies all of it, including the history.
+A fresh receipt's stored value went from 816 to 316 bytes; the remaining 116
+bytes of each entry are the key and the ledger-entry envelope. The
+`layout::a_receipt_is_stored_without_field_names_or_its_own_id` test fails
+if a fresh receipt's value grows past 330 bytes. Index pages shrank only
+because the farmer in this run had fewer receipts on page 0.
 
 ## Rent per bump length
 
 Rent is linear in ledgers. So **the rent per receipt per month is the same
 whatever the bump length**, and only the per-renewal overhead differs: 2,542
-stroops per entry plus a share of one transaction. Measured on Testnet, a
-native extend of 50 entries cost 22,534 stroops besides rent, about 900
-stroops per receipt. "Receipt + guard" is the 912-byte receipt plus its
-124-byte `DepositIndex`, the two entries kept alive per receipt.
+stroops per entry plus a share of one transaction (a native extend of 50
+entries cost 22,534 stroops besides rent, about 900 per receipt). "Receipt +
+guard" is the receipt plus its 124-byte `DepositIndex`, the two entries kept
+alive per live receipt. The last column is the same figure before the
+change.
 
-| bump | network | rent per receipt + guard | batch of 25 (one tx) | per receipt per month, all-in |
-|---|---|---:|---:|---:|
-| 30 days (~1 month) | Testnet | 0.2253 | 5.6342 | 0.2254 |
-| 30 days (~1 month) | mainnet today | 0.0437 | 1.0941 | 0.0438 |
-| 30 days (~1 month) | mainnet at 10,000/KB | 0.4322 | 10.8066 | 0.4323 |
-| 90 days (~3 months) | Testnet | 0.6748 | 16.8726 | 0.2250 |
-| 90 days (~3 months) | mainnet today | 0.1300 | 3.2525 | 0.0434 |
-| 90 days (~3 months) | mainnet at 10,000/KB | 1.2955 | 32.3900 | 0.4319 |
-| 175 days (contract's `extend_ttl`) | Testnet | 1.3117 | 32.7938 | 0.2249 |
-| 175 days (contract's `extend_ttl`) | mainnet today | 0.2523 | 6.3101 | 0.0433 |
-| 175 days (contract's `extend_ttl`) | mainnet at 10,000/KB | 2.5186 | 62.9664 | 0.4318 |
+| bump | network | rent per receipt + guard (556 B) | batch of 25 (one tx) | per receipt per month, all-in | before (per receipt per month) |
+|---|---|---:|---:|---:|---:|
+| 30 days | Testnet | 0.1248 | 3.1222 | 0.1249 | 0.2254 |
+| 30 days | mainnet today | 0.0237 | 0.5941 | 0.0238 | 0.0438 |
+| 30 days | mainnet at 10,000/KB | 0.2322 | 5.8066 | 0.2323 | 0.4323 |
+| 90 days | Testnet | 0.3734 | 9.3367 | 0.1245 | 0.2250 |
+| 90 days | mainnet today | 0.0700 | 1.7525 | 0.0234 | 0.0434 |
+| 90 days | mainnet at 10,000/KB | 0.6955 | 17.3900 | 0.2319 | 0.4319 |
+| 175 days (contract) | Testnet | 0.7255 | 18.1405 | 0.1244 | 0.2249 |
+| 175 days (contract) | mainnet today | 0.1356 | 3.3934 | 0.0233 | 0.0433 |
+| 175 days (contract) | mainnet at 10,000/KB | 1.3519 | 33.7997 | 0.2318 | 0.4318 |
 
 **A 12-month bump is not possible on either network.** `max_entry_ttl` is
 180 days, and the largest bump the network accepts is `max_entry_ttl − 1` =
@@ -315,45 +366,42 @@ renewal whatever we choose.
 
 The contract's `extend_ttl` and `extend_ttl_batch` always bump to 175 days
 (`ENTRY_TTL_EXTEND_TO`), and the deployment is immutable. A different bump
-length is still available without a new contract: the native
+length is available without a new contract: the native
 `ExtendFootprintTTL` operation, which is what `stellar contract extend
 --key-xdr … --ledgers-to-extend N` sends, lets anyone extend any entry by any
-length up to the ceiling. One transaction can carry up to 400 keys. The
-measured native extend of 25 receipts and their guards is in the table
-above.
+length up to the ceiling. One transaction can carry up to 400 keys.
 
 ### What the bump length actually changes: leftover TTL
 
 Since rent per month is fixed, the bump length decides one thing: how much
 prepaid TTL is left when a receipt exits and stops being renewed. The mint
 always prepays 175 days. Modelled per receipt (receipt + guard, keep-alive
-cost only, mint excluded), with a daily job:
+cost only, mint excluded), with a daily job, at today's sizes and rates:
 
 | strategy | receipt lives | renewals | TTL left over at exit | mainnet today | Testnet |
 |---|---:|---:|---:|---:|---:|
-| contract `extend_ttl_batch`: renew under 30 days left, to 175 | 180 d | 1 | 141 d | 0.2108 | 1.0946 |
-| contract `extend_ttl_batch`: renew under 30 days left, to 175 | 270 d | 1 | 51 d | 0.2108 | 1.0946 |
-| contract `extend_ttl_batch`: renew under 30 days left, to 175 | 365 d | 2 | 102 d | 0.4217 | 2.1893 |
-| native, ~quarterly: under 14 days left, to 104 | 180 d | 1 | 86 d | 0.1315 | 0.6824 |
-| native, ~quarterly: under 14 days left, to 104 | 270 d | 2 | 87 d | 0.2631 | 1.3648 |
-| native, ~quarterly: under 14 days left, to 104 | 365 d | 3 | 83 d | 0.3946 | 2.0472 |
-| native, ~monthly: under 14 days left, to 44 | 180 d | 1 | 26 d | 0.0452 | 0.2329 |
-| native, ~monthly: under 14 days left, to 44 | 270 d | 4 | 29 d | 0.1808 | 0.9314 |
-| native, ~monthly: under 14 days left, to 44 | 365 d | 7 | 27 d | 0.3164 | 1.6300 |
+| contract `extend_ttl_batch`: renew under 30 days left, to 175 | 180 d | 1 | 141 d | 0.1135 | 0.6056 |
+| contract `extend_ttl_batch`: renew under 30 days left, to 175 | 270 d | 1 | 51 d | 0.1135 | 0.6056 |
+| contract `extend_ttl_batch`: renew under 30 days left, to 175 | 365 d | 2 | 102 d | 0.2270 | 1.2113 |
+| native, ~quarterly: under 14 days left, to 104 | 180 d | 1 | 86 d | 0.0709 | 0.3776 |
+| native, ~quarterly: under 14 days left, to 104 | 270 d | 2 | 87 d | 0.1417 | 0.7552 |
+| native, ~quarterly: under 14 days left, to 104 | 365 d | 3 | 83 d | 0.2126 | 1.1328 |
+| native, ~monthly: under 14 days left, to 44 | 180 d | 1 | 26 d | 0.0245 | 0.1290 |
+| native, ~monthly: under 14 days left, to 44 | 270 d | 4 | 29 d | 0.0981 | 0.5161 |
+| native, ~monthly: under 14 days left, to 44 | 365 d | 7 | 27 d | 0.1718 | 0.9032 |
 
-## Recommendation: TTL bump and renewal cadence
+## TTL bump and renewal cadence (decided)
 
-**Keep the contract's 175-day bump (`extend_ttl_batch`), with the daily job
-and 30-day threshold described above, and alert at 14 days left.** In
-practice each live receipt is renewed once every 145 days.
+**The contract's 175-day bump (`extend_ttl_batch`), a daily job with the
+30-day threshold described above, and an alert at 14 days left.** In practice
+each live receipt is renewed once every 145 days.
 
 Why not shorter native bumps, given that they leave less TTL over:
 
 - **The saving is small.** On a 9-month receipt, monthly native bumps save
-  about 0.03 XLM per receipt at today's mainnet rate, about 15% of
-  keep-alive. At 2,000 deposits a month that is about 60 XLM a month (about
-  600 at 10,000/KB). For receipts that live just past 175 days the saving is
-  larger, 0.17 XLM each.
+  about 0.015 XLM per receipt at today's mainnet rate, about 14% of
+  keep-alive. At 2,000 deposits a month that is about 30 XLM a month (about
+  300 at 10,000/KB).
 - **The safety margin shrinks.** With 175-day bumps the job can be down for
   29 days before anything archives. With monthly bumps renewed at 14 days
   left, the margin is 13 days.
@@ -364,128 +412,122 @@ Why not shorter native bumps, given that they leave less TTL over:
   monitor.
 
 Revisit if the mainnet rent rate moves well off the floor, or if the indexer
-shows most receipts exiting in the first weeks after a renewal. In either
-case switch the job to native extends of about 90 days for receipts the
-indexer expects to exit soon, and keep `extend_ttl_batch` for the rest.
+shows most receipts exiting in the first weeks after a renewal.
+
+## Finished receipts are left to archive
+
+`extend_ttl_batch` skips `Exited` and `Revoked` receipts, and the job never
+sends them (see the job above). They archive about 175 days after their last
+write. The indexer's event archive is their permanent record, and reading
+one from the chain still works: the read restores it, at the reader's cost
+(about 0.07 XLM on mainnet today for a 456-byte exited receipt).
+
+**What this saves** depends on what the keep-alive would otherwise have
+done. Measured against a job that renews every receipt of a deposit until
+the deposit's last receipt exits, for a deposit drawn down in tranches (a
+partial exit every two months, then a final exit), the receipts avoided are
+the exited tranches. Each is a 456-byte receipt. The deposit guard is shared
+with the live receipt and is kept alive either way.
+
+| deposit life | partial exits (days) | renewals avoided | Testnet | mainnet today | mainnet at 10,000/KB |
+|---|---|---:|---:|---:|---:|
+| 270 days | 60, 120, 180, 240 | 2 | 0.9932 | 0.1860 | 1.8504 |
+| 365 days | 60, 120, 180, 240, 300 | 4 | 1.9864 | 0.3719 | 3.7007 |
+
+On a 9-month life the first two tranches would each have been renewed once.
+Later tranches still have prepaid TTL when the deposit ends. Beyond the
+deposit's life the saving is open-ended: a finished receipt kept alive
+indefinitely costs, per year, 0.23 XLM on mainnet today, 2.31 XLM at
+10,000/KB, and 1.24 XLM on Testnet. The
+skip in the contract makes sure a careless job cannot run that up.
+
+The financed and simple profiles below are not affected: their only exited
+receipts finish at the end of the deposit's life.
 
 ## Monthly cost estimate
 
 Each deposit profile's full lifetime cost: its transactions plus keep-alive
-under the recommended policy. Multiplied by the monthly intake, that is the
+under the decided policy. Multiplied by the monthly intake, that is the
 steady-state monthly spend once intake has been running for a full receipt
 lifetime. Stated in XLM so it doesn't go stale with the XLM price. It does
 move with the rent rate, so all three rates are shown.
 
-| deposit profile | network | XLM per deposit | 200 deposits / month | 2,000 deposits / month |
+| deposit profile | network | XLM per deposit, before → after | 200 deposits / month, before → after | 2,000 deposits / month, before → after |
 |---|---|---:|---:|---:|
-| Simple: mint, full exit, 9-month life | mainnet today | 0.478 | 96 | 957 |
-| Simple: mint, full exit, 9-month life | mainnet at 10,000/KB | 4.725 | 945 | 9,450 |
-| Simple: mint, full exit, 9-month life | Testnet | 2.463 | 493 | 4,927 |
-| Financed: mint, partial lock, full unlock, partial exit, full exit, 12-month life (two receipts kept alive) | mainnet today | 2.086 | 417 | 4,173 |
-| Financed: mint, partial lock, full unlock, partial exit, full exit, 12-month life (two receipts kept alive) | mainnet at 10,000/KB | 20.689 | 4,138 | 41,378 |
-| Financed: mint, partial lock, full unlock, partial exit, full exit, 12-month life (two receipts kept alive) | Testnet | 10.782 | 2,156 | 21,564 |
+| Simple: mint, full exit, 9-month life | Testnet | 2.463 → **1.391** | 493 → **278** | 4,927 → **2,782** |
+| Simple: mint, full exit, 9-month life | mainnet today | 0.478 → **0.265** | 96 → **53** | 957 → **529** |
+| Simple: mint, full exit, 9-month life | mainnet at 10,000/KB | 4.725 → **2.587** | 945 → **517** | 9,450 → **5,174** |
+| Financed: mint, partial lock, full unlock, partial exit, full exit, 12-month life | Testnet | 10.782 → **4.592** | 2,156 → **918** | 21,564 → **9,185** |
+| Financed: mint, partial lock, full unlock, partial exit, full exit, 12-month life | mainnet today | 2.086 → **0.871** | 417 → **174** | 4,173 → **1,741** |
+| Financed: mint, partial lock, full unlock, partial exit, full exit, 12-month life | mainnet at 10,000/KB | 20.689 → **8.544** | 4,138 → **1,709** | 41,378 → **17,088** |
+
+**Per deposit, after the change, to compare against fee income:**
+
+| deposit profile | Testnet | mainnet today | mainnet at 10,000/KB |
+|---|---:|---:|---:|
+| Simple | 1.391 XLM | 0.265 XLM | 2.587 XLM |
+| Financed | 4.592 XLM | 0.871 XLM | 8.544 XLM |
+
+Plan with the 10,000/KB column; "mainnet today" is the current spend, at the
+1,000/KB floor, which mainnet leaves at about 2.0 GB of state. On 2026-10-04
+it held 1.78 GB, up from 1.68 GB the day before.
 
 Not included: index-page keep-alive (`extend_index_ttl`, about 0.0005 XLM
-per call), recoveries (about 2.3 XLM per default on Testnet and 0.45 at
+per call), recoveries (about 1.76 XLM per default on Testnet and 0.33 at
 today's mainnet rate, for `start_recovery` + `complete_recovery` +
 `record_settlement`), and the classic transaction base fee (100 stroops per
 transaction).
 
-## Proposal: split in place instead of retiring the parent (not implemented)
+## Split in place (implemented)
 
-**Today:** a partial exit, lock or unlock retires the parent as
-`Status::Split` and writes two new children. Each child is a new 900–1,300
-byte entry that prepays 175 days of rent, and each is appended to the owner
-and warehouse indexes, and to the lender index when pledged.
+A partial exit, lock or unlock used to retire the parent as `Status::Split`
+and write two new children. Now the receipt keeps the remainder under its
+own id. Its `weight_kg` and `bag_count` drop, and its status, lock and
+recovery stay as they are. Only the portion acted on becomes a new receipt,
+with `parent_id` naming the original. The partial-operation rows above show
+the saving.
 
-**Proposal:** the parent keeps the remainder under its own id. Its
-`weight_kg` and `bag_count` drop, and its status, lock and recovery stay as
-they are. Only the portion being acted on becomes a new receipt, with
-`parent_id` pointing at the parent. Lineage is preserved: every child still
-names its parent, and the `Split` event already records each division
-(parent weight before, both weights, both ids). The `remainder_id` in that
-event becomes the parent's own id.
+**The trade, accepted:**
 
-**Measured saving.** The change is about 10 lines in `split.rs`, because
-callers only use `.taken` and the remainder's id. A copy of the crate with
-the change was built outside the repo, and both versions ran the same
-scenario in the test host. Rent ledger-bytes for each operation, applied to
-the fees actually measured on Testnet:
+- **A receipt's weight is no longer fixed for life.** Receipt #N's weight
+  shrinks with each partial operation, so the chain holds only its current
+  weight. Its history is `parent_id` plus the `split` events: each records
+  the weight before, both weights after, and both ids (`remainder_id` is
+  always the parent's own id). RPC keeps events for about 7 days, so **the
+  indexer's own event archive is the permanent record** and must keep every
+  `split` event (`docs/events.md`).
+- **The conservation invariant** is now "the receipts of a deposit always
+  sum to its minted weight and bag count", and a receipt's weight never
+  grows. `prop_split` and `prop_lifecycle` check both after every step, and
+  that a sale is accounted for by the sold receipt plus whatever was split
+  off it since. The 28 tests that asserted the old shape were rewritten.
+- `Status::Split` no longer exists. Indexers that treated it as "superseded"
+  need updating.
+- It shipped as a new deployment with `DATA_VERSION` 2.
 
-| operation | today, Testnet | in place, Testnet | today, mainnet | in place, mainnet | saving |
-|---|---:|---:|---:|---:|---:|
-| lock — partial | 2.6185 | 1.4254 | 0.5070 | 0.2778 | 46% |
-| exit — partial | 2.4154 | 1.2203 | 0.4674 | 0.2379 | 49% |
-| unlock — partial | 2.6326 | 1.2126 | 0.5091 | 0.2364 | 54% |
+A partial exit still writes the exited portion as its own receipt. An exit
+that writes no receipt at all, leaving the `exited` event as the only
+record, would cost about the same as a full exit. That is a separate
+decision and is not implemented.
 
-Each partial operation also writes one fewer entry and about 920–1,150 fewer
-bytes. It also stops the tree from growing: today every partial operation
-leaves a retired parent that still takes up index slots and, while it
-lives, rent.
+## Smaller entries (implemented)
 
-**What we would lose or have to change:**
+Receipts and sales are stored as positional records (`src/layout.rs`). The
+public `Receipt` and `Sale` types, and everything the contract returns, are
+unchanged. Field order and codes are the layout, so changing either means
+bumping `DATA_VERSION`.
 
-- **Receipt immutability.** Today a receipt's weight never changes, and a
-  holder of receipt #N knows exactly what it represents. In place, the
-  parent's weight shrinks over time, so the history is reconstructed from
-  `Split` events rather than read from retired records. RPC keeps events for
-  about 7 days, so this relies on the indexer.
-- **The conservation invariant** becomes "the live receipts of a deposit sum
-  to its minted weight" instead of "the leaves of the split tree sum to the
-  root". The property tests carry over, but 28 existing tests assert the old
-  shape: the parent becomes `Split`, two new ids are created, and
-  `leaves()` excludes the parent. They would be rewritten.
-- `Status::Split` would no longer be produced. Indexers that treat it as
-  "superseded" need updating.
-- Because the contract is immutable (`docs/upgrade.md`), this ships as a new
-  deployment with a `DATA_VERSION` bump.
+| change | done | what it cost us |
+|---|---|---|
+| Store positionally, without field names | yes | Raw storage is no longer self-describing: `stellar contract read` and explorers show unnamed fields, so tools decode through `data_version` and `layout.rs`. A small conversion cost on every read and write. |
+| Unit enums (`status`, `weight_source`, recovery `resolution`) as `u32` codes; an absent lock or recovery as an empty `Vec` | yes | Readable variant names in raw storage. An unknown code aborts with `CorruptRecord` rather than being guessed. |
+| Drop `receipt_id` (and a sale's `sale_id`) from the stored value | yes | A raw value no longer says which record it is; reads fill it in from the key. |
+| Length caps on `loan_ref`, `sale_ref`, `settlement_ref` | yes, 64 bytes (`MAX_REF_LEN`), error `RefTooLong` | Longer refs must be shortened or hashed off-chain. The point is the bound: lenders are not registered, and each ref is copied into the lock, every recovery record, the sale and every receipt split off, so an unbounded ref let anyone inflate rent that the keep-alive job pays. |
+| `commodity`, `grade` as `u32` codes | **no** | They are already symbols (`MAIZE_WHITE` is 20 bytes, `GRADE_1` 16), so codes would save about 20 bytes per receipt, about 0.0008 XLM per receipt-month on mainnet today. Codes need a registry that `mint` checks, which would make it reject unregistered commodities, a behaviour change. Not worth it. |
+| `custodian`, `verifier` as registry indexes, or off-chain | **no** | Who attested the intake is the receipt's provenance. |
+| Fixed-size byte arrays for refs | **no** | At the lengths in use they are larger than the strings (`BytesN<32>` is 40 bytes vs 16 for `"LOAN-M1"`). The cap gives the bound without making refs opaque. |
 
-Even in place, a partial exit still creates one receipt, so it would cost
-about 55× a full exit instead of about 110×. Going further, a partial exit
-could create no receipt at all: the parent shrinks and the `Exited` event is
-the record. That would cost about the same as a full exit. The cost is that
-the exited portion has no on-chain receipt to query, only an event, which
-again relies on the indexer. That is a product decision, not a technical one.
-
-## Proposal: smaller entries (not implemented)
-
-Breakdown of a freshly minted receipt: 912 bytes, of which the value is 816.
-**404 of those 816 bytes are field names.** `#[contracttype]` structs are
-stored as a map keyed by field-name symbols. Savings below are per receipt,
-using today's mainnet rate, with Testnet in brackets. "At mint" is the rent
-prepaid for the first 175 days.
-
-| change | bytes saved | % of entry | per receipt-month | at mint | what we lose |
-|---|---:|---:|---:|---:|---|
-| **Store positionally** (a private tuple-struct or `Vec` layout for storage, and keep the public `Receipt` type for reads and the ABI) | 404 | 44% | 0.0168 (0.0877) | 0.0982 (0.5113) | Raw storage is no longer self-describing: `stellar contract read` and explorers show unnamed fields, so tools must decode through `DATA_VERSION`. Small conversion cost on every read and write. |
-| Shorter field names (1 character) instead of positional | 152 | 17% | 0.0063 (0.0330) | 0.0369 (0.1924) | Unreadable field names, both in storage and, if the public type is not kept separate, in the ABI. Strictly worse than positional. |
-| Unit enums (`status`, `weight_source`) as `u32`, and the empty `lock` and `recovery` as void | 72 | 8% | 0.0030 (0.0156) | 0.0175 (0.0911) | Readable variant names in raw storage. Needs explicit conversion code and a check that rejects unknown codes. |
-| Drop `receipt_id` from the value (it is already in the key) | 32 | 4% | 0.0013 (0.0069) | 0.0078 (0.0405) | A raw value no longer says which receipt it is. Reads fill it in from the key. |
-| `commodity`, `grade` as `u32` codes instead of `Symbol` | 20 | 2% | 0.0008 (0.0043) | 0.0049 (0.0253) | They are already symbols (`MAIZE_WHITE` = 20 B, `GRADE_1` = 16 B), so there is little left to gain. Codes would need an on-chain or published registry, and lose self-description. |
-| `custodian`, `verifier` as a `u32` registry index instead of an address | 72 | 8% | 0.0030 (0.0156) | 0.0175 (0.0911) | A new registry of index↔address. Deregistering an attester must never reuse an index, or old receipts would point at the wrong party. |
-| Move `custodian` and `verifier` off-chain entirely (event only) | 124 | 14% | 0.0052 (0.0269) | 0.0301 (0.1569) | **Not recommended.** Who attested the intake is the receipt's provenance, and it would then rest on the indexer. |
-| **Combined:** positional + enums + `receipt_id` + commodity/grade codes | 508 | 56% | 0.0212 (0.1102) | 0.1235 (0.6429) | All of the above except the attester change. |
-
-**Fixed-size byte arrays for `loan_ref`, `sale_ref`, `settlement_ref`** (and
-`deposit_id`) do not save space at the lengths we use today. A `String`
-costs 8 bytes plus the text rounded up to 4. `BytesN<16>` costs 24 and
-`BytesN<32>` costs 40. Measured: `"LOAN-M1"` = 16 B, `"LN-2026-000123"` =
-24 B, and a 36-character UUID string = 44 B. So `BytesN<16>` (a binary UUID)
-saves 20 bytes per ref only if the refs really are UUID strings, while
-`BytesN<32>` (a hash of an off-chain document) saves nothing and costs more
-for short refs. The ref appears in the `Lock`, every `Recovery`, and the
-`Sale`, and every split child copies it.
-
-The real argument for fixed-size refs is **a bound, not a saving.** None of
-these strings has a length cap today, so a caller can make every entry that
-stores one, and every split child that copies it, arbitrarily large, up to
-the 64 KB entry limit. Whoever runs the keep-alive pays that rent. Whatever
-type is chosen, a length cap (for example 64 bytes) should be added. The
-cost is that refs become opaque bytes on-chain (a hash, or a binary UUID) and
-must be resolved off-chain. A hash has the side benefit of not exposing loan
-or bank identifiers publicly.
-
-**What should stay on-chain:** weight, bags, moisture, warehouse, owner,
-status, lock and recovery state, and the attesters. Those are what the
-contract enforces or what a third party needs to trust a receipt. Interest
-rates and loan terms already live off-chain.
+`deposit_id` has no length cap. It is supplied by a registered custodian
+and countersigned by a registered verifier, so it is not open to an
+arbitrary caller the way lender refs were. Cap it in the next deployment if
+that changes.

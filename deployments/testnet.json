@@ -2,12 +2,12 @@
   "network": "testnet",
   "network_passphrase": "Test SDF Network ; September 2015",
   "rpc_url": "https://soroban-testnet.stellar.org/",
-  "contract_id": "CBTFO2N4A7ILUX6H72FFZOGWF62ZCAKB4I6X6CI52Q2522DVNKECW6KU",
-  "wasm_hash": "8fd58cb374bf1771537bb212c47e6fe160a9f82264060076227f0937c6f191e1",
+  "contract_id": "CDLSGBNISQ7F3ROSEE5MHAZEZYNUV5LOGQA2EWTP4BPODLQT4G2LZJW3",
+  "wasm_hash": "36e155b8c851944df78b471aea67775437c7062e9c2dcc02671e3379386b854a",
   "admin": "GBCF56H2FW3JOTAJFNPX6MROJSXSLNGMID3EXXAMDE6BANFOVR3XQKLR",
   "deployer": "GBCF56H2FW3JOTAJFNPX6MROJSXSLNGMID3EXXAMDE6BANFOVR3XQKLR",
-  "start_ledger": 4971770,
-  "data_version": 1,
-  "git_commit": "324e1f565a05dc15d6825fbfc6219670c78ff78f-dirty",
-  "deployed_at": "2026-10-01T19:20:54Z"
+  "start_ledger": 5009100,
+  "data_version": 2,
+  "git_commit": "2c0925204f25795941492a7b82b7597ff0c2d4f6",
+  "deployed_at": "2026-10-03T23:11:50Z"
 }

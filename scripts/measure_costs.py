@@ -29,7 +29,7 @@ ROLES = ["custodian", "verifier", "farmer", "farmer2", "lender", "operator", "bu
 STROOPS_PER_XLM = 10_000_000
 DAY = 17_280  # ledgers
 # Failures that mean "could not reach RPC", not "the transaction was bad".
-TRANSIENT = re.compile(r"Request timeout|submission timeout|client error \(Connect\)|"
+TRANSIENT = re.compile(r"Request timeout|submission timeout|client error \(Connect\)|dns error|"
                        r"error sending request|connection (reset|closed|refused)|"
                        r"timed out|\b50[234]\b", re.I)
 
@@ -76,7 +76,7 @@ class Net:
     def submit(self, label, args):
         """Runs a submitting CLI command, retrying transient RPC failures
         without ever applying a transaction twice. Returns (stdout, hash)."""
-        for attempt in range(6):
+        for attempt in range(10):
             res = sh(*args, check=False)
             hashes = re.findall(r"Signing transaction: ([0-9a-f]{64})", res.stderr)
             if res.returncode == 0 and hashes:
@@ -87,7 +87,7 @@ class Net:
                 # Failed before signing (simulation or sequence fetch):
                 # nothing was submitted, so retrying is safe.
                 log(f"{label}: RPC unreachable before signing, retrying")
-                time.sleep(5 * (attempt + 1))
+                time.sleep(min(5 * (attempt + 1), 30))
                 continue
             # Signed, then lost the connection: the transaction may or may
             # not have landed. Ask RPC; retry only once it is known absent.
@@ -110,14 +110,15 @@ class Net:
         req = urllib.request.Request(self.rpc, body,
                                      {"content-type": "application/json",
                                       "user-agent": "farmledge-measure-costs/1"})
-        # Reads are idempotent, so any network failure is retried.
-        for attempt in range(6):
+        # Reads are idempotent, so any network failure is retried, for about
+        # five minutes in all: long enough to ride out a DNS outage.
+        for attempt in range(12):
             try:
                 with urllib.request.urlopen(req, timeout=30) as r:
                     return json.load(r)["result"]
             except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
                 log(f"{method}: {e}, retrying")
-                time.sleep(5 * (attempt + 1))
+                time.sleep(min(5 * (attempt + 1), 30))
         sys.exit(f"RPC {method} kept failing")
 
     def entry_size(self, key_b64):
