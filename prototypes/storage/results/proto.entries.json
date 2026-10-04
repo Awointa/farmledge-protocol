@@ -1,0 +1,12 @@
+{
+  "A receipt": 432,
+  "A bitmap chunk (1,024 deposits)": 252,
+  "B day root": 212,
+  "B head": 160,
+  "D pledge record": 380,
+  "D leaf bitmap (1,024 leaves)": 256,
+  "C aggregate entry, 1 lot(s)": 372,
+  "C aggregate entry, 3 lot(s)": 764,
+  "C aggregate entry, 10 lot(s)": 2136,
+  "C aggregate entry, 10 lots, one pledged": 2232
+}

@@ -1,0 +1,6 @@
+{
+  "network": "testnet",
+  "rpc_url": "https://soroban-testnet.stellar.org/",
+  "contract_id": "CBSD3ZLE6Y6IKNKYGHG663DWZ6ZESST4V3QHICVTKRWHUCB2ZKRSB6S5",
+  "note": "THROWAWAY PROTOTYPE, not a Farmledge deployment"
+}
