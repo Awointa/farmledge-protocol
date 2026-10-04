@@ -18,10 +18,19 @@ tested and deployed to Testnet.
 The contract is **immutable**: nothing can replace its Wasm, and changes ship
 as a new deployment. See [docs/upgrade.md](docs/upgrade.md).
 
+**The storage strategy is under review.** We are evaluating three changes:
+minting a receipt only when it is first pledged (about 30% of deposits),
+anchoring the inventory layer with a daily Merkle root instead of a receipt
+per deposit, and aggregating entries per farmer and commodity. Together they
+could cut rent by roughly 90%. **Treat the current per-deposit mint, and the
+costs that follow from it, as provisional, not settled.** Today's costs, and the
+assumption behind them (every deposit mints a receipt that pays rent for
+9–12 months), are in [docs/archival.md](docs/archival.md).
+
 | Document | What it is |
 |---|---|
-| [docs/events.md](docs/events.md) | Every event, field and type, and the transition that emits it. **The contract between protocol and backend.** |
-| [docs/archival.md](docs/archival.md) | Storage rent, the keep-alive job, the restore path, and measured Testnet costs |
+| [docs/events.md](docs/events.md) | Every event, field and type, the transition that emits it, and the indexer's correctness requirements. **The contract between protocol and backend.** |
+| [docs/archival.md](docs/archival.md) | Storage rent, the keep-alive job, the restore path, and measured costs for Testnet and mainnet |
 | [docs/upgrade.md](docs/upgrade.md) | Why the contract is immutable, and the migration path |
 | [docs/adversarial-review.md](docs/adversarial-review.md) | Every way a farmer or lender could lose what they are owed, and the test that prevents it |
 
@@ -84,8 +93,10 @@ free remainder are then fully independent receipts.
 A receipt's weight is therefore **not fixed for life**. Across all the
 receipts of one deposit it always sums to what was minted. The chain keeps
 only current weights, and the `split` event recording each division is the
-history, so the indexer archives it (`docs/events.md`). This halves the cost
-of every partial operation compared with retiring the parent and writing two
+history. **Archiving every `split` event durably is a correctness
+requirement for the indexer, not an operational nicety**: see "Indexer
+requirements" in [docs/events.md](docs/events.md). This halves the cost of
+every partial operation compared with retiring the parent and writing two
 children (`docs/archival.md`).
 
 ## Authorisation
@@ -97,7 +108,7 @@ every later lending call authorises the lender **recorded in the lock**.
 
 | Function | Must sign | Also required |
 |---|---|---|
-| `mint` | custodian **and** verifier | custodian registered for the warehouse; verifier registered |
+| `mint` | custodian **and** verifier | custodian registered for the warehouse; verifier registered; `deposit_id` unused and at most `MAX_REF_LEN` (64) bytes |
 | `exit` | custodian **and** owner | custodian registered for the receipt's warehouse; status `Active` |
 | `revoke` | admin | status `Active` |
 | `extend_ttl`, `extend_ttl_batch`, `extend_index_ttl` | nobody | at most `MAX_TTL_BATCH` (25) receipts or pages per call; `Exited` and `Revoked` receipts are skipped |
@@ -193,8 +204,9 @@ warehouse ids, loan and sale references. Names, phone numbers, farmer
 consent records and loan terms stay off-chain in `farmledge-app` and the
 lenders' own systems. Anything written here is public and permanent, so
 references such as `loan_ref`, `sale_ref` and `settlement_ref` must be
-opaque identifiers, never personal data. Each is capped at 64 bytes
-(`MAX_REF_LEN`), which fits a UUID, a bank reference or a hex SHA-256.
+opaque identifiers, never personal data. Each, and `deposit_id`, is capped
+at 64 bytes (`MAX_REF_LEN`), which fits a UUID, a bank reference or a hex
+SHA-256.
 
 ## Prerequisites
 

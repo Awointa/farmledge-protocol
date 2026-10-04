@@ -119,6 +119,11 @@ impl ReceiptContract {
         if moisture_pct > MAX_MOISTURE_BPS {
             return Err(Error::InvalidMoisture);
         }
+        // Capped like the lending refs: it is stored in the receipt, copied
+        // onto every receipt split off, and is the deposit guard's key.
+        if deposit_id.len() > MAX_REF_LEN {
+            return Err(Error::RefTooLong);
+        }
         if storage::has_deposit_id(&env, &deposit_id) {
             return Err(Error::DuplicateDepositId);
         }

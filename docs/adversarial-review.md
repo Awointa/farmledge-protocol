@@ -41,6 +41,7 @@ outside this repo.
 | F26 | A rejected call leaves partial state behind | all-or-nothing calls | `prop_lifecycle` (no side effects on rejection) |
 | F27 | A finished receipt archives, its deposit guard with it, and the same intake is minted again | the archived guard is restored when the duplicate mint reads it, and the mint is refused | **NEW** `ttl::an_archived_deposit_guard_still_blocks_a_duplicate_mint` |
 | F28 | A stored record is misread as a different status or weight source | unknown stored codes abort with `CorruptRecord` | **NEW** `layout::an_unknown_stored_code_is_a_corrupt_record`, `layout::the_layout_is_lossless` |
+| F29 | An over-long `deposit_id` (custodian keys are held by the backend in Phase 1) inflates the rent of the receipt, every receipt split off it and its deposit guard | `deposit_id` capped at `MAX_REF_LEN` (64 bytes) | **NEW** `adversarial::a_deposit_id_longer_than_the_cap_is_rejected_and_mints_nothing` |
 
 ## b. A lender loses collateral it is rightfully owed
 

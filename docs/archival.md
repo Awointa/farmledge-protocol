@@ -10,6 +10,18 @@ path, what each operation costs (measured on Testnet, converted to mainnet)
 before and after the `data_version` 2 changes, the renewal cadence, and the
 monthly and per-deposit cost.
 
+**The cost assumption, stated plainly:** every figure in this document
+assumes that **every deposit mints its own receipt, and that receipt pays
+rent for 9–12 months**. Change that assumption (see the storage review
+below) and every per-deposit and monthly figure changes with it.
+
+**The storage strategy is under review.** We are evaluating three changes:
+minting a receipt only when it is first pledged (about 30% of deposits),
+anchoring the inventory layer with a daily Merkle root instead of a receipt
+per deposit, and aggregating entries per farmer and commodity. Together they
+could cut rent by roughly 90%. **Treat the current per-deposit mint, and the
+costs that follow from it, as provisional, not settled.**
+
 ## The TTL policy
 
 Defined in `contracts/receipt/src/storage.rs`:
@@ -446,6 +458,10 @@ receipts finish at the end of the deposit's life.
 
 ## Monthly cost estimate
 
+These figures assume every deposit mints a receipt that pays rent for 9–12
+months (see the top of this document), under a storage strategy that is
+still under review.
+
 Each deposit profile's full lifetime cost: its transactions plus keep-alive
 under the decided policy. Multiplied by the monthly intake, that is the
 steady-state monthly spend once intake has been running for a full receipt
@@ -494,8 +510,10 @@ the saving.
   weight. Its history is `parent_id` plus the `split` events: each records
   the weight before, both weights after, and both ids (`remainder_id` is
   always the parent's own id). RPC keeps events for about 7 days, so **the
-  indexer's own event archive is the permanent record** and must keep every
-  `split` event (`docs/events.md`).
+  indexer's own event archive is the permanent record**. Durable archiving,
+  a one-day lag alert, gap checks after any outage and backups are a
+  **correctness requirement**, spelled out in `docs/events.md` ("Indexer
+  requirements").
 - **The conservation invariant** is now "the receipts of a deposit always
   sum to its minted weight and bag count", and a receipt's weight never
   grows. `prop_split` and `prop_lifecycle` check both after every step, and
@@ -522,12 +540,12 @@ bumping `DATA_VERSION`.
 | Store positionally, without field names | yes | Raw storage is no longer self-describing: `stellar contract read` and explorers show unnamed fields, so tools decode through `data_version` and `layout.rs`. A small conversion cost on every read and write. |
 | Unit enums (`status`, `weight_source`, recovery `resolution`) as `u32` codes; an absent lock or recovery as an empty `Vec` | yes | Readable variant names in raw storage. An unknown code aborts with `CorruptRecord` rather than being guessed. |
 | Drop `receipt_id` (and a sale's `sale_id`) from the stored value | yes | A raw value no longer says which record it is; reads fill it in from the key. |
-| Length caps on `loan_ref`, `sale_ref`, `settlement_ref` | yes, 64 bytes (`MAX_REF_LEN`), error `RefTooLong` | Longer refs must be shortened or hashed off-chain. The point is the bound: lenders are not registered, and each ref is copied into the lock, every recovery record, the sale and every receipt split off, so an unbounded ref let anyone inflate rent that the keep-alive job pays. |
+| Length caps on `deposit_id`, `loan_ref`, `sale_ref`, `settlement_ref` | yes, 64 bytes (`MAX_REF_LEN`), error `RefTooLong` | Longer refs must be shortened or hashed off-chain. The point is the bound: lenders are not registered, and each ref is copied into the lock, every recovery record, the sale and every receipt split off, so an unbounded ref let anyone inflate rent that the keep-alive job pays. |
 | `commodity`, `grade` as `u32` codes | **no** | They are already symbols (`MAIZE_WHITE` is 20 bytes, `GRADE_1` 16), so codes would save about 20 bytes per receipt, about 0.0008 XLM per receipt-month on mainnet today. Codes need a registry that `mint` checks, which would make it reject unregistered commodities, a behaviour change. Not worth it. |
 | `custodian`, `verifier` as registry indexes, or off-chain | **no** | Who attested the intake is the receipt's provenance. |
 | Fixed-size byte arrays for refs | **no** | At the lengths in use they are larger than the strings (`BytesN<32>` is 40 bytes vs 16 for `"LOAN-M1"`). The cap gives the bound without making refs opaque. |
 
-`deposit_id` has no length cap. It is supplied by a registered custodian
-and countersigned by a registered verifier, so it is not open to an
-arbitrary caller the way lender refs were. Cap it in the next deployment if
-that changes.
+`deposit_id` is capped at the same 64 bytes. A registered custodian supplies
+it, but in Phase 1 custodian keys are held by the backend, so registration
+is not the safeguard it sounds like. It is stored in every receipt of the
+deposit and is the deposit guard's key.

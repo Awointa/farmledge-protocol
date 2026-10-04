@@ -57,7 +57,8 @@ pub enum Error {
     LenderIsOwner = 36,
     /// No sale with this `sale_id` — the recovery was never completed.
     SaleNotFound = 37,
-    /// `loan_ref`, `sale_ref` or `settlement_ref` longer than `MAX_REF_LEN`.
+    /// `deposit_id`, `loan_ref`, `sale_ref` or `settlement_ref` longer than
+    /// `MAX_REF_LEN`.
     RefTooLong = 38,
 
     // --- operations ---

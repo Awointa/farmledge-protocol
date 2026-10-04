@@ -22,13 +22,16 @@ use crate::types::{
     WeightSource, DATA_VERSION,
 };
 
-/// Longest `loan_ref`, `sale_ref` or `settlement_ref` accepted, in bytes.
+/// Longest `deposit_id`, `loan_ref`, `sale_ref` or `settlement_ref`
+/// accepted, in bytes.
 ///
 /// The point is the bound, not the bytes saved: each ref is stored in the
-/// `Lock`, every `Recovery` and the `Sale`, and copied onto every receipt
-/// split off, so an unbounded ref would let a caller inflate the rent of
-/// entries someone else keeps alive. 64 bytes fits a UUID, a bank
-/// reference or a hex SHA-256.
+/// receipt, `Lock`, every `Recovery` or the `Sale`, and copied onto every
+/// receipt split off, so an unbounded ref would let a caller inflate the
+/// rent of entries someone else keeps alive. `deposit_id` is capped too:
+/// a registered custodian supplies it, but in Phase 1 custodian keys are
+/// held by the backend, so registration is not the safeguard it sounds
+/// like. 64 bytes fits a UUID, a bank reference or a hex SHA-256.
 pub const MAX_REF_LEN: u32 = 64;
 
 fn require_ref(r: &String) -> Result<(), Error> {

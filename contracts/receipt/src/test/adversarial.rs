@@ -427,3 +427,34 @@ fn refs_longer_than_the_cap_are_rejected_and_change_nothing() {
         Some(text(&env, max))
     );
 }
+
+/// `deposit_id` is capped like the lending refs. A registered custodian
+/// supplies it, but in Phase 1 custodian keys are held by the backend, so
+/// registration alone does not bound it. An over-long one mints nothing.
+#[test]
+fn a_deposit_id_longer_than_the_cap_is_rejected_and_mints_nothing() {
+    let env = Env::default();
+    let l = setup_lending(&env);
+    let max = crate::MAX_REF_LEN as usize;
+    let mint = |deposit: &String| {
+        l.f.client.try_mint(
+            &l.f.custodian,
+            &l.f.verifier,
+            deposit,
+            &l.f.farmer,
+            &l.f.warehouse,
+            &soroban_sdk::Symbol::new(&env, super::COMMODITY),
+            &soroban_sdk::Symbol::new(&env, super::GRADE),
+            &2_000,
+            &crate::WeightSource::Scale,
+            &20,
+            &super::MOISTURE,
+        )
+    };
+
+    assert_eq!(mint(&text(&env, max + 1)), Err(Ok(Error::RefTooLong)));
+    assert_eq!(l.f.client.owner_page_count(&l.f.farmer), 0);
+    assert_eq!(next_id(&l.f), 1, "no receipt id was allocated");
+
+    assert_eq!(mint(&text(&env, max)), Ok(Ok(1)));
+}

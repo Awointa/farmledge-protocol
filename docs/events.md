@@ -4,6 +4,44 @@ This file is the contract between the protocol and the backend indexer. If
 it disagrees with `contracts/receipt/src/events.rs`, the code is right and
 this file is a bug. Change both in the same commit.
 
+## Indexer requirements: a correctness requirement, not an operational nicety
+
+Since `data_version` 2 the chain stores only each receipt's **current**
+weight. A partial exit, lock or unlock reduces the receipt in place, and the
+only record of what it weighed before is the `split` event. RPC providers
+keep events for about 7 days. After that, a missed event can only be
+recovered by replaying ledger history from Stellar's history archives
+(Galexie or captive core), which is slow and costly: treat it as disaster
+recovery, not a fallback. **If the indexer loses a `split` event, the
+history of that receipt's weight is lost.** Finished (`Exited`, `Revoked`)
+receipts are also left to archive on-chain, so the event archive is their
+practical record too.
+
+The indexer must therefore meet all four of these. Failing any of them is a
+data-loss bug, to be treated with the same priority as a contract bug.
+
+1. **Archive every event durably, `split` above all.** Write each event of
+   this contract (raw XDR plus ledger sequence, transaction hash and event
+   index) to durable storage **before** advancing the ingestion cursor.
+   Writes are idempotent on (ledger, transaction hash, event index), so
+   re-ingesting a range is always safe. Never prune the archive.
+2. **Alert if indexing falls more than one day behind.** Page when the last
+   ledger indexed is more than 17,280 ledgers (about 24 hours) behind the
+   network's latest ledger. That leaves about 6 days of RPC retention to
+   catch up before events become unrecoverable from RPC.
+3. **Verify there are no ledger gaps after any outage**, of the indexer, its
+   database or its RPC provider. Confirm that the indexed ledgers cover every
+   ledger from the deployment's `start_ledger` (in `deployments/<network>.json`)
+   to the cursor without a hole, and re-fetch any gap with `getEvents` while
+   it is still inside RPC retention. Then reconcile: for each receipt touched
+   in the outage window, the minted weight minus every `taken_weight_kg`
+   split off it (following `parent_id`) must equal its current weight from
+   `get_receipt`.
+4. **Back up the archive.** Off-site, on a schedule, with restores tested.
+   The backup is the second copy of data that exists nowhere else.
+
+The same requirements are stated in `docs/archival.md` and the README.
+
 ## Encoding
 
 Every event is a `#[contractevent]` struct:
@@ -42,12 +80,8 @@ status, owner and pledge unchanged and its weight and bag count reduced. The
 operation's event names the **taken** receipt (`split.taken_id`), which is
 new. Apply the events in emission order.
 
-**Archive every `split` event.** Because the parent is reduced in place, the
-chain stores only a receipt's current weight. Its earlier weights exist only
-in these events, and RPC keeps events for about 7 days, so the indexer's
-own archive is the permanent record. The same is true of `exited` and
-`revoked`: finished receipts are no longer kept alive (see
-`docs/archival.md`), so their state is restored only on demand.
+**Archive every `split` event.** It is the only record of the receipt's
+earlier weight. See [Indexer requirements](#indexer-requirements-a-correctness-requirement-not-an-operational-nicety).
 
 `extend_ttl_batch` emits one `ttl_extended` per receipt it keeps alive, in
 the order the ids were given. `Exited` and `Revoked` receipts are skipped and
