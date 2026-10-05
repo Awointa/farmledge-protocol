@@ -1,0 +1,461 @@
+[
+  {
+    "op": "anchor \u2014 first day (creates the head), 2,048 leaves",
+    "fee": 2262770,
+    "non_refundable": 11975,
+    "refundable": 2250695,
+    "rent": 2248507,
+    "instructions": 1119951,
+    "read_bytes": 0,
+    "write_bytes": 340,
+    "ro": 4,
+    "rw": 2,
+    "event_bytes": 408,
+    "ledger": 5034134,
+    "tx": "7a075d921734a1b5495eeea37772cba0d154918508b066068d9c71bce780fe48"
+  },
+  {
+    "op": "anchor \u2014 next day, 2,048 leaves",
+    "fee": 205800,
+    "non_refundable": 11989,
+    "refundable": 193711,
+    "rent": 191523,
+    "instructions": 1139694,
+    "read_bytes": 0,
+    "write_bytes": 340,
+    "ro": 4,
+    "rw": 2,
+    "event_bytes": 408,
+    "ledger": 5034136,
+    "tx": "f4802e95c4c0db6da88ecb87b9854aaec7cd6592c0dcf26223e85678767d3568"
+  },
+  {
+    "op": "mint_from_anchor \u2014 first in its claim chunk (creates chunk, owner index), depth 11",
+    "fee": 16109509,
+    "non_refundable": 52457,
+    "refundable": 16056952,
+    "rent": 16052577,
+    "instructions": 3254638,
+    "read_bytes": 144,
+    "write_bytes": 1628,
+    "ro": 7,
+    "rw": 8,
+    "event_bytes": 884,
+    "ledger": 5034139,
+    "tx": "30769ce02eb7aa82781bdc460905deb468278def8285e8c3d6dd6f14268dc4f5"
+  },
+  {
+    "op": "mint_from_anchor \u2014 later lot, depth 11",
+    "fee": 5975076,
+    "non_refundable": 52629,
+    "refundable": 5922347,
+    "rent": 5917972,
+    "instructions": 3398673,
+    "read_bytes": 144,
+    "write_bytes": 1712,
+    "ro": 7,
+    "rw": 8,
+    "event_bytes": 884,
+    "ledger": 5034141,
+    "tx": "8fb2640ac53260360df2ff2cd01e13b50e4cb74200d2c7dca746ef70f5d0fa4b"
+  },
+  {
+    "op": "preclaim \u2014 25 numbers, creates their chunk",
+    "fee": 3242920,
+    "non_refundable": 12307,
+    "refundable": 3230513,
+    "rent": 3209477,
+    "instructions": 4072760,
+    "read_bytes": 0,
+    "write_bytes": 256,
+    "ro": 3,
+    "rw": 1,
+    "event_bytes": 4300,
+    "ledger": 5034147,
+    "tx": "f1ac3ba4a7418c15a3a9a8d4d4fb2771c894b739da4c29b9c0b14ff70d8072b8"
+  },
+  {
+    "op": "preclaim \u2014 25 numbers, chunk exists",
+    "fee": 33459,
+    "non_refundable": 12323,
+    "refundable": 21036,
+    "rent": 0,
+    "instructions": 4095453,
+    "read_bytes": 0,
+    "write_bytes": 256,
+    "ro": 3,
+    "rw": 1,
+    "event_bytes": 4300,
+    "ledger": 5034149,
+    "tx": "0240b5869e73f21b66d8f40448026c04dc18ca469317c5fe4c0803ada1a962c5"
+  },
+  {
+    "op": "lock \u2014 full",
+    "fee": 1378733,
+    "non_refundable": 21112,
+    "refundable": 1357521,
+    "rent": 1355567,
+    "instructions": 1782114,
+    "read_bytes": 144,
+    "write_bytes": 960,
+    "ro": 3,
+    "rw": 4,
+    "event_bytes": 388,
+    "ledger": 5034151,
+    "tx": "4e605662e295f95c61427e8f3c93f33b6cdaf59a1b69127e2043082986c468be"
+  },
+  {
+    "op": "lock \u2014 partial (splits)",
+    "fee": 7416093,
+    "non_refundable": 40457,
+    "refundable": 7375536,
+    "rent": 7371102,
+    "instructions": 2778722,
+    "read_bytes": 144,
+    "write_bytes": 2432,
+    "ro": 2,
+    "rw": 10,
+    "event_bytes": 896,
+    "ledger": 5034153,
+    "tx": "e35caec2c0b55a6a839f97df43bfacb704d938e2259e1676500d20d3366f3414"
+  },
+  {
+    "op": "exit \u2014 full",
+    "fee": 219818,
+    "non_refundable": 14773,
+    "refundable": 204945,
+    "rent": 203089,
+    "instructions": 1553515,
+    "read_bytes": 144,
+    "write_bytes": 540,
+    "ro": 4,
+    "rw": 2,
+    "event_bytes": 368,
+    "ledger": 5034156,
+    "tx": "64a5b0cb7a3b1e7c3565187f26d0619ac8ced04ce64a039324852184fafe9fc1"
+  },
+  {
+    "op": "exit \u2014 partial (splits)",
+    "fee": 6257179,
+    "non_refundable": 34122,
+    "refundable": 6222957,
+    "rent": 6218621,
+    "instructions": 2541646,
+    "read_bytes": 144,
+    "write_bytes": 2024,
+    "ro": 3,
+    "rw": 8,
+    "event_bytes": 876,
+    "ledger": 5034158,
+    "tx": "b087a442fc748df3cd4ce45c5c400a1f3eee088f5c4793d61b55cad38c905e09"
+  },
+  {
+    "op": "extend_ttl_batch \u2014 2 Exited receipts (skipped)",
+    "fee": 4708,
+    "non_refundable": 4568,
+    "refundable": 40,
+    "rent": 0,
+    "instructions": 963321,
+    "read_bytes": 0,
+    "write_bytes": 0,
+    "ro": 5,
+    "rw": 0,
+    "event_bytes": 0,
+    "ledger": 5034161,
+    "tx": "6460429bb636c90e0601115615f356d097106d01368c0c0cbea4a21a832e6c81"
+  },
+  {
+    "op": "extend_due",
+    "fee": 9364,
+    "non_refundable": 7154,
+    "refundable": 2110,
+    "rent": 0,
+    "instructions": 960696,
+    "read_bytes": 0,
+    "write_bytes": 552,
+    "ro": 2,
+    "rw": 1,
+    "event_bytes": 428,
+    "ledger": 5034164,
+    "tx": "a733ccb72cde245be404960b515c09fde746bdb06132cfcd551d4f99843abb55"
+  },
+  {
+    "op": "unlock \u2014 partial (splits)",
+    "fee": 6203931,
+    "non_refundable": 33085,
+    "refundable": 6170746,
+    "rent": 6165843,
+    "instructions": 2238098,
+    "read_bytes": 0,
+    "write_bytes": 2424,
+    "ro": 1,
+    "rw": 9,
+    "event_bytes": 992,
+    "ledger": 5034166,
+    "tx": "025336be95556e61c68ba33f29af1c8cf279496e120625e6955f69015a23e20f"
+  },
+  {
+    "op": "extend_ttl \u2014 1 receipt, TTL above threshold (no-op bump)",
+    "fee": 5577,
+    "non_refundable": 4051,
+    "refundable": 1426,
+    "rent": 0,
+    "instructions": 921553,
+    "read_bytes": 0,
+    "write_bytes": 0,
+    "ro": 4,
+    "rw": 0,
+    "event_bytes": 288,
+    "ledger": 5034168,
+    "tx": "a6ebd3ceef00ae90023fd3d6d9738b9610cbf2cb14703de3daaca442b0866277"
+  },
+  {
+    "op": "extend_ttl_batch \u2014 25 receipts, TTL above threshold",
+    "fee": 52720,
+    "non_refundable": 17424,
+    "refundable": 35196,
+    "rent": 0,
+    "instructions": 5575487,
+    "read_bytes": 0,
+    "write_bytes": 0,
+    "ro": 28,
+    "rw": 0,
+    "event_bytes": 7200,
+    "ledger": 5034225,
+    "tx": "42884b2118e6ebec7a86424a6f30cf22d459a090e78020ad88b170bca14a6004"
+  },
+  {
+    "op": "extend_index_ttl \u2014 2 pages",
+    "fee": 5445,
+    "non_refundable": 5305,
+    "refundable": 40,
+    "rent": 0,
+    "instructions": 893760,
+    "read_bytes": 0,
+    "write_bytes": 0,
+    "ro": 5,
+    "rw": 0,
+    "event_bytes": 0,
+    "ledger": 5034227,
+    "tx": "0979af73a22b72b5017be3f9b687fb747b8629e539ac79587f94103db8919375"
+  },
+  {
+    "op": "native extend \u2014 1 receipt, +1 day (to 176 days)",
+    "fee": 37428,
+    "non_refundable": 2394,
+    "refundable": 34934,
+    "rent": 34934,
+    "instructions": 0,
+    "read_bytes": 0,
+    "write_bytes": 0,
+    "ro": 1,
+    "rw": 0,
+    "event_bytes": 0,
+    "ledger": 5034230,
+    "tx": "f8d741f1877faa0b91ef489efac0371728e52fede9875ca4a0886188d0f92da7",
+    "extended": [
+      {
+        "bytes": 452,
+        "ledgers": 17289
+      }
+    ]
+  },
+  {
+    "op": "native extend \u2014 1 receipt, +5 days (to 180-day ceiling)",
+    "fee": 166924,
+    "non_refundable": 2394,
+    "refundable": 164430,
+    "rent": 164430,
+    "instructions": 0,
+    "read_bytes": 0,
+    "write_bytes": 0,
+    "ro": 1,
+    "rw": 0,
+    "event_bytes": 0,
+    "ledger": 5034232,
+    "tx": "08e6e74520ccf37d8b7843f7b180db2fbaf96243f9349a4b800e0ffc10213157",
+    "extended": [
+      {
+        "bytes": 452,
+        "ledgers": 86408
+      }
+    ]
+  },
+  {
+    "op": "native extend \u2014 25 receipts, to 180-day ceiling",
+    "fee": 4116482,
+    "non_refundable": 11184,
+    "refundable": 4105198,
+    "rent": 4105198,
+    "instructions": 0,
+    "read_bytes": 0,
+    "write_bytes": 0,
+    "ro": 25,
+    "rw": 0,
+    "event_bytes": 0,
+    "ledger": 5034239,
+    "tx": "e1b6f64717514caf38630f38f9c4fd1640c3a21f70a676c64124310fffbfc9c9",
+    "extended": [
+      {
+        "bytes": 448,
+        "ledgers": 86467
+      },
+      {
+        "bytes": 448,
+        "ledgers": 86465
+      },
+      {
+        "bytes": 448,
+        "ledgers": 86463
+      },
+      {
+        "bytes": 448,
+        "ledgers": 86461
+      },
+      {
+        "bytes": 448,
+        "ledgers": 86459
+      },
+      {
+        "bytes": 452,
+        "ledgers": 86457
+      },
+      {
+        "bytes": 452,
+        "ledgers": 86455
+      },
+      {
+        "bytes": 452,
+        "ledgers": 86453
+      },
+      {
+        "bytes": 452,
+        "ledgers": 86451
+      },
+      {
+        "bytes": 452,
+        "ledgers": 86449
+      },
+      {
+        "bytes": 452,
+        "ledgers": 86447
+      },
+      {
+        "bytes": 452,
+        "ledgers": 86445
+      },
+      {
+        "bytes": 452,
+        "ledgers": 86443
+      },
+      {
+        "bytes": 452,
+        "ledgers": 86441
+      },
+      {
+        "bytes": 452,
+        "ledgers": 86439
+      },
+      {
+        "bytes": 452,
+        "ledgers": 86437
+      },
+      {
+        "bytes": 452,
+        "ledgers": 86435
+      },
+      {
+        "bytes": 452,
+        "ledgers": 86433
+      },
+      {
+        "bytes": 452,
+        "ledgers": 86431
+      },
+      {
+        "bytes": 452,
+        "ledgers": 86429
+      },
+      {
+        "bytes": 452,
+        "ledgers": 86427
+      },
+      {
+        "bytes": 452,
+        "ledgers": 86425
+      },
+      {
+        "bytes": 452,
+        "ledgers": 86423
+      },
+      {
+        "bytes": 452,
+        "ledgers": 86421
+      },
+      {
+        "bytes": 452,
+        "ledgers": 86419
+      }
+    ]
+  },
+  {
+    "op": "start_recovery",
+    "fee": 1915436,
+    "non_refundable": 7209,
+    "refundable": 1908127,
+    "rent": 1906271,
+    "instructions": 962422,
+    "read_bytes": 0,
+    "write_bytes": 696,
+    "ro": 2,
+    "rw": 1,
+    "event_bytes": 376,
+    "ledger": 5034241,
+    "tx": "1306d88d5760591d5e62a98d0baf062ea1566b086d2f610fe27ea169eeccf6ff"
+  },
+  {
+    "op": "complete_recovery",
+    "fee": 5514099,
+    "non_refundable": 37879,
+    "refundable": 5476120,
+    "rent": 5473327,
+    "instructions": 2588553,
+    "read_bytes": 144,
+    "write_bytes": 2172,
+    "ro": 3,
+    "rw": 9,
+    "event_bytes": 560,
+    "ledger": 5034267,
+    "tx": "51da3a0cd670c29092ad12984c358e22c7dad7c8c2b3b1f3bc235a8f6122f1a9"
+  },
+  {
+    "op": "record_settlement",
+    "fee": 274142,
+    "non_refundable": 17739,
+    "refundable": 256303,
+    "rent": 253490,
+    "instructions": 1648559,
+    "read_bytes": 144,
+    "write_bytes": 600,
+    "ro": 4,
+    "rw": 3,
+    "event_bytes": 572,
+    "ledger": 5034269,
+    "tx": "e4a1c5978ce46a08f6b11a4ccaafd014e96ebc08605f6601c28960fe6624e915"
+  },
+  {
+    "op": "unlock \u2014 full",
+    "fee": 9068,
+    "non_refundable": 7034,
+    "refundable": 1934,
+    "rent": 0,
+    "instructions": 955083,
+    "read_bytes": 0,
+    "write_bytes": 456,
+    "ro": 2,
+    "rw": 1,
+    "event_bytes": 384,
+    "ledger": 5034271,
+    "tx": "5e56b8bf9f1991c2fa11cfd4433f58242b1db00b54ef12f67c7b9de65cf51823"
+  }
+]

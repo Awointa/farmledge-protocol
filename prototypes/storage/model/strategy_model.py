@@ -3,7 +3,7 @@
     python3 prototypes/storage/model/strategy_model.py
 
 Inputs, all measured on Testnet:
-  deployments/testnet.costs.json / entries.json     current design (data_version 2)
+  deployments/testnet.v2.costs.json / v2.entries.json  the data_version 2 design
   prototypes/storage/results/proto.*.json           the throwaway prototype (A, B, C, D)
 Rates: the network settings snapshots in prototypes/storage/data/.
 """
@@ -25,8 +25,8 @@ RATES = [("Testnet", T), ("mainnet today", M), ("mainnet at 10,000/KB", HI)]
 X, DAY, TTLW = 1e7, 17280, 2542
 
 D = f"{REPO}/deployments"
-CUR = {r["op"]: r for r in json.load(open(f"{D}/testnet.costs.json"))}
-CUR_E = json.load(open(f"{D}/testnet.entries.json"))
+CUR = {r["op"]: r for r in json.load(open(f"{D}/testnet.v2.costs.json"))}
+CUR_E = json.load(open(f"{D}/testnet.v2.entries.json"))
 PRO = {r["op"]: r for r in json.load(open(f"{PROTO}/results/proto.costs.json"))}
 PRO_E = json.load(open(f"{PROTO}/results/proto.entries.json"))
 

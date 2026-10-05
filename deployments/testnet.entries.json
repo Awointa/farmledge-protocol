@@ -1,0 +1,47 @@
+{
+  "Head": {
+    "bytes": 164,
+    "live_until": 8058134,
+    "at_ledger": 5034136
+  },
+  "DayRoot (temporary)": {
+    "bytes": 176,
+    "live_until": 5552536,
+    "at_ledger": 5034137
+  },
+  "Receipt \u2014 Active, freshly minted": {
+    "bytes": 448,
+    "live_until": 8058141,
+    "at_ledger": 5034141
+  },
+  "Claimed chunk (1,024 deposit numbers)": {
+    "bytes": 256,
+    "live_until": 8058139,
+    "at_ledger": 5034141
+  },
+  "Receipt \u2014 Locked": {
+    "bytes": 544,
+    "live_until": 8058141,
+    "at_ledger": 5034154
+  },
+  "Receipt \u2014 Active, reduced in place by a split": {
+    "bytes": 448,
+    "live_until": 8058143,
+    "at_ledger": 5034154
+  },
+  "OwnerIndex page 0": {
+    "bytes": 800,
+    "live_until": 8057930,
+    "at_ledger": 5034227
+  },
+  "Receipt \u2014 after a completed recovery": {
+    "bytes": 668,
+    "live_until": 8058141,
+    "at_ledger": 5034267
+  },
+  "Sale \u2014 settled": {
+    "bytes": 420,
+    "live_until": 8058267,
+    "at_ledger": 5034269
+  }
+}

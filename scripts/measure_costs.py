@@ -12,18 +12,32 @@ stderr.
 
 Needs stellar-cli and the admin identity named in the deployment record (it
 must be the contract admin, as on Testnet). Creates and funds its own
-`fl-*` identities. Every deposit id is unique per run, so it can be re-run.
+`fl-*` identities. Each run registers its own warehouse, so its anchors
+start a fresh chain, and it can be re-run.
+
+Minting is on demand (`data_version` 3): each run anchors two days of a
+warehouse's books as 2,048-leaf trees (a warehouse with about 2,000 active
+lots, proof depth 11), then mints from the latest. Leaf hashes and proofs
+are computed with `scripts/verify_proof.py`, the standalone verifier
+published in `docs/events.md`, which the run then uses to check two proof
+bundles against the chain.
 """
 
 import argparse
 import base64
 import json
+import os
 import re
+import secrets
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import verify_proof as vp  # noqa: E402
 
 ROLES = ["custodian", "verifier", "farmer", "farmer2", "lender", "operator", "buyer"]
 STROOPS_PER_XLM = 10_000_000
@@ -121,12 +135,12 @@ class Net:
                 time.sleep(min(5 * (attempt + 1), 30))
         sys.exit(f"RPC {method} kept failing")
 
-    def entry_size(self, key_b64):
-        """Size in bytes of a persistent entry as rent is charged on it: the
-        whole LedgerEntry XDR. Returns (size, live_until_ledger)."""
+    def entry_size(self, key_b64, durability="persistent"):
+        """Size in bytes of an entry as rent is charged on it: the whole
+        LedgerEntry XDR. Returns (size, live_until_ledger)."""
         lk = encode("LedgerKey", {"contract_data": {
             "contract": self.c, "key": decode("ScVal", key_b64),
-            "durability": "persistent"}})
+            "durability": durability}})
         e = self.rpc_call("getLedgerEntries", {"keys": [lk]})["entries"][0]
         # LedgerEntry = data + lastModifiedLedgerSeq (4) + ext discriminant (4).
         return len(base64.b64decode(e["xdr"])) + 8, e["liveUntilLedgerSeq"]
@@ -225,9 +239,10 @@ def main():
         sh("stellar", "keys", "fund", ident, "--network", net.network, check=False)
     A = {r: net.addr(i) for r, i in ids.items()}
 
-    log("registering roles (ignoring 'already registered')")
-    for fn, kw in [("add_warehouse", {"warehouse_id": "WH_KANO_01"}),
-                   ("add_custodian", {"warehouse_id": "WH_KANO_01", "custodian": A["custodian"]}),
+    wh = f"WH_M{run}"
+    log(f"registering roles for {wh} (ignoring 'already registered')")
+    for fn, kw in [("add_warehouse", {"warehouse_id": wh}),
+                   ("add_custodian", {"warehouse_id": wh, "custodian": A["custodian"]}),
                    ("add_verifier", {"verifier": A["verifier"]}),
                    ("add_recovery_operator", {"operator": A["operator"]})]:
         args = ["stellar", "contract", "invoke", "--id", net.c, "--source-account", a.admin,
@@ -238,35 +253,16 @@ def main():
 
     rows = []
     entries = {}
-    deposits = {}
-    n = 0
 
     def save():
         with open(f"deployments/{net.network}.costs.json", "w") as f:
             json.dump(rows, f, indent=2)
 
-    def mint(farmer, kg=2000, label=None):
-        nonlocal n
-        n += 1
-        out, h = net.invoke(ids["custodian"], "mint",
-                            custodian=ids["custodian"], verifier=ids["verifier"],
-                            deposit_id=f"DEP-{run}-{n}", farmer=ids[farmer],
-                            warehouse_id="WH_KANO_01", commodity="MAIZE_WHITE",
-                            grade="GRADE_1", weight_kg=kg, weight_source='"Scale"',
-                            bag_count=20, moisture_pct=1250)
-        if label:
-            rows.append(costs(net, label, h))
-        deposits[int(out)] = f"DEP-{run}-{n}"
-        return int(out)
-
     def receipt_key(rid):
         return scval_key("Receipt", {"u64": str(rid)})
 
-    def deposit_key(rid):
-        return scval_key("DepositIndex", {"string": deposits[rid]})
-
-    def size(label, key):
-        b, live_until = net.entry_size(key)
+    def size(label, key, durability="persistent"):
+        b, live_until = net.entry_size(key, durability)
         latest = net.rpc_call("getLatestLedger", {})["sequence"]
         entries[label] = {"bytes": b, "live_until": live_until, "at_ledger": latest}
         with open(f"deployments/{net.network}.entries.json", "w") as f:
@@ -296,14 +292,105 @@ def main():
     sh("stellar", "keys", "generate", fresh, "--network", net.network)
     sh("stellar", "keys", "fund", fresh, "--network", net.network)
     ids["fresh"] = fresh
-    log("mint (new farmer)")
-    mint("fresh", label="mint — farmer's first receipt (creates owner index)")
-    log("mint (existing farmer)")
-    r1 = mint("farmer", label="mint — farmer's later receipt")
+    A["fresh"] = net.addr(fresh)
+
+    # --- the books: every lot this run mints, anchored on two days -------
+    owners = ["fresh", "farmer", "farmer", "farmer"] + ["farmer2"] * (a.batch + 2)
+    depth = 11
+    day_a = int(time.time()) // 86_400 - 2
+
+    def books(day):
+        leaves = [{"version": 1, "kind": 2, "warehouse_id": wh, "day": day, "index": i,
+                   "deposit_no": i + 1, "deposit_id": f"DEP-{run}-{i + 1}", "receipt_id": 0,
+                   "receipt_version": 0, "owner": A[o], "commodity": "MAIZE_WHITE",
+                   "grade": "GRADE_1", "kg": 1000 if o == "farmer2" else 2000,
+                   "weight_source": "Scale", "bags": 20, "moisture_bps": 1250,
+                   "custodian": A["custodian"], "verifier": A["verifier"],
+                   "deposited_at": day * 86_400 - 3_600, "at": (day + 1) * 86_400,
+                   "salt": secrets.token_hex(32)} for i, o in enumerate(owners)]
+        # The rest of the warehouse: only the real leaves' paths matter.
+        hashes = [vp.leaf_hash(l) for l in leaves]
+        hashes += [secrets.token_bytes(32) for _ in range(2 ** depth - len(hashes))]
+        levels = [hashes]
+        while len(levels[-1]) > 1:
+            cur = levels[-1]
+            levels.append([vp.sha(b"\x01", cur[i], cur[i + 1]) for i in range(0, len(cur), 2)])
+        proofs = []
+        for i in range(len(leaves)):
+            proof, j = [], i
+            for level in levels[:-1]:
+                proof.append(level[j ^ 1])
+                j //= 2
+            proofs.append(proof)
+        return leaves, proofs, levels[-1][0]
+
+    # The verifier's leaf hash must be the contract's own.
+    leaves_a, proofs_a, root_a = books(day_a)
+    sim = sh("stellar", "contract", "invoke", "--id", net.c, "--source-account", ids["buyer"],
+             "--network", net.network, "--send=no", "--", "leaf_hash",
+             "--leaf", json.dumps(leaves_a[0])).stdout.strip().strip('"')
+    if sim != vp.leaf_hash(leaves_a[0]).hex():
+        sys.exit(f"leaf_hash mismatch: contract {sim}, verifier {vp.leaf_hash(leaves_a[0]).hex()}")
+
+    head_a = op("anchor — first day (creates the head), 2,048 leaves", ids["custodian"],
+                "anchor", custodian=ids["custodian"], warehouse_id=wh, day=day_a,
+                root=root_a.hex(), leaves=2 ** depth).strip('"')
+    day_b = day_a + 1
+    leaves_b, proofs_b, root_b = books(day_b)
+    op("anchor — next day, 2,048 leaves", ids["custodian"], "anchor",
+       custodian=ids["custodian"], warehouse_id=wh, day=day_b, root=root_b.hex(),
+       leaves=2 ** depth)
+    size("Head", scval_key("Head", {"symbol": wh}))
+    size("DayRoot (temporary)", scval_key("DayRoot", {"symbol": wh}, {"u32": day_b}),
+         "temporary")
+
+    # Two proof bundles, checked with the standalone verifier against the
+    # chain: today's (day root on-chain) and yesterday's through the head.
+    for label, leaf, proof, prev, later in [
+            ("latest day", leaves_b[1], proofs_b[1], head_a, []),
+            ("earlier day, through the head chain", leaves_a[1], proofs_a[1], "00" * 32,
+             [{"day": day_b, "leaves": 2 ** depth, "root": root_b.hex()}])]:
+        bundle = {"rpc": net.rpc, "contract_id": net.c, "leaf": leaf,
+                  "proof": [p.hex() for p in proof], "day_leaves": 2 ** depth,
+                  "prev_head": prev, "later_days": later}
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(bundle, fh)
+        res = sh(sys.executable, os.path.join(os.path.dirname(__file__), "verify_proof.py"),
+                 fh.name, check=False)
+        os.unlink(fh.name)
+        log(f"verify_proof.py, {label}:\n{res.stdout.strip()}")
+        if res.returncode != 0:
+            sys.exit(f"verify_proof.py rejected a genuine bundle:\n{res.stdout}{res.stderr}")
+    if os.path.exists("docs/events.md"):
+        doc = open("docs/events.md").read()
+        if open(os.path.join(os.path.dirname(__file__), "verify_proof.py")).read() not in doc:
+            log("WARNING: docs/events.md does not embed the current verify_proof.py")
+
+    def mint(i, label=None):
+        out, h = net.invoke(ids["custodian"], "mint_from_anchor",
+                            custodian=ids["custodian"], verifier=ids["verifier"],
+                            leaf=json.dumps(leaves_b[i]),
+                            proof=json.dumps([p.hex() for p in proofs_b[i]]))
+        if label:
+            rows.append(costs(net, label, h))
+            save()
+        return int(out)
+
+    log("mint_from_anchor (new farmer, new claim chunk)")
+    mint(0, "mint_from_anchor — first in its claim chunk (creates chunk, owner index), depth 11")
+    log("mint_from_anchor (existing farmer)")
+    r1 = mint(1, "mint_from_anchor — later lot, depth 11")
     size("Receipt — Active, freshly minted", receipt_key(r1))
-    size("DepositIndex", deposit_key(r1))
-    r2 = mint("farmer")
-    r3 = mint("farmer")
+    size("Claimed chunk (1,024 deposit numbers)", scval_key("Claimed", {"symbol": wh}, {"u64": "0"}))
+    r2 = mint(2)
+    r3 = mint(3)
+
+    # Pre-claims (cutover, audit finding A19): a full batch into a new
+    # chunk, then into the same chunk.
+    op("preclaim — 25 numbers, creates their chunk", a.admin, "preclaim",
+       warehouse_id=wh, deposit_nos=json.dumps(list(range(1100, 1125))))
+    op("preclaim — 25 numbers, chunk exists", a.admin, "preclaim",
+       warehouse_id=wh, deposit_nos=json.dumps(list(range(1125, 1150))))
 
     due = int(time.time()) + 90
     locked = int(op("lock — full", ids["farmer"], "lock", receipt_id=r1,
@@ -330,7 +417,7 @@ def main():
 
     log(f"minting {a.batch} receipts for the batch run")
     # Two spare receipts for the single-entry extends below.
-    *batch, spare1, spare2 = [mint("farmer2", kg=1000) for _ in range(a.batch + 2)]
+    *batch, spare1, spare2 = [mint(4 + i) for i in range(a.batch + 2)]
     op(f"extend_ttl_batch — {a.batch} receipts, TTL above threshold", ids["buyer"],
        "extend_ttl_batch", receipt_ids=json.dumps(batch))
     op("extend_index_ttl — 2 pages", ids["buyer"], "extend_index_ttl",
@@ -348,8 +435,8 @@ def main():
            [receipt_key(spare1)], 176 * DAY)
     extend("native extend — 1 receipt, +5 days (to 180-day ceiling)",
            [receipt_key(spare2)], 180 * DAY - 1)
-    extend(f"native extend — {a.batch} receipts + deposit guards, to 180-day ceiling",
-           [k for r in batch for k in (receipt_key(r), deposit_key(r))], 180 * DAY - 1)
+    extend(f"native extend — {a.batch} receipts, to 180-day ceiling",
+           [receipt_key(r) for r in batch], 180 * DAY - 1)
 
     log("waiting for the loan to fall due")
     while int(time.time()) <= due + 1 + 10:
