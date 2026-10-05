@@ -1,5 +1,48 @@
 # farmledge-protocol
 
+> **Contract frozen.** `data_version` 3 (Testnet
+> `CBW6TA5UJMXJY2VYPJV6WUVWNUP3PKZNPXFMC2CNVCWZDF3SKIT4UAIN`) is final until
+> field use gives a reason to change it. **An external audit is required
+> before mainnet**: the proof check, the claim bitmap and anchor ordering are
+> new security-critical code. The backend talks to v3 alone: **no
+> dual-contract support is to be built — Testnet abandoned v2 and mainnet
+> launches on v3.**
+>
+> **What the contract cannot enforce, the backend must.** Each of these is a
+> correctness requirement, as serious as a contract bug, and the contract
+> relies on all of them:
+>
+> 1. **Freshness: freeze a lot before minting it.** No dispatch of a lot may
+>    be recorded between the cutoff of the anchored day its mint uses and
+>    the mint's confirmation or definite abandonment. Fail closed; unfreeze
+>    only when the mint can no longer land
+>    ([backend §5](docs/backend-requirements.md#5-minted-lots-the-freeze-and-governed-on-chain-after)).
+> 2. **Pre-claim gate: no mint before the pre-claim list is complete.** If a
+>    deployment ever starts beside an older contract holding real lots, no
+>    lot may be minted on the new one until every lot held on the old one is
+>    pre-claimed and verified. Dormant on Testnet, which is why it is written
+>    here ([backend §6](docs/backend-requirements.md#6-cutover-reference-only-not-to-be-built)).
+> 3. **One lot, one deposit number, forever.** Assigned once at intake, never
+>    reused or reassigned; the numbers are contiguous, with one deposit leaf
+>    per new number ([backend §3](docs/backend-requirements.md#3-anchoring-job)).
+> 4. **Complete, honest daily books.** Every deposit, dispatch and end-of-day
+>    balance is a leaf, each with a fresh salt; leaves, salts and proofs are
+>    persisted before anything is delivered ([backend §3](docs/backend-requirements.md#3-anchoring-job)).
+> 5. **Anchor every warehouse daily, in order, never skipping a day.** A
+>    missed anchor is an **urgent** page: until it lands nothing in that
+>    warehouse can mint ([backend §3](docs/backend-requirements.md#3-anchoring-job)).
+> 6. **A minted lot leaves only through `exit`.** Never dispatched
+>    off-chain; alert if its anchored balance ever differs from its receipt
+>    ([backend §5](docs/backend-requirements.md#5-minted-lots-the-freeze-and-governed-on-chain-after)).
+> 7. **Every farmer gets their proofs, automatically, and verification never
+>    goes through Farmledge** ([backend §4](docs/backend-requirements.md#4-farmer-proof-delivery),
+>    [standalone verifier](docs/events.md#farmer-proofs)).
+> 8. **Archive every event before advancing the cursor,** `split` and
+>    `anchored` above all; check for gaps; back up
+>    ([indexer requirements](docs/events.md#indexer-requirements-a-correctness-requirement-not-an-operational-nicety)).
+> 9. **Keep minted receipts alive daily,** never sending `Exited` or
+>    `Revoked` ids ([keep-alive job](docs/archival.md#the-keep-alive-job-backend)).
+
 The Soroban smart contract behind Farmledge: a digital warehouse receipt for
 maize deposited at a partner warehouse, used as loan collateral and, on
 default, sold through bank escrow. See the Farmledge System Design Document
@@ -57,6 +100,12 @@ source of truth for the backend.
 | Testnet | `CBTFO2N4A7ILUX6H72FFZOGWF62ZCAKB4I6X6CI52Q2522DVNKECW6KU` | **Retired** 2026-10-03. `data_version` 1: immutable build with a constructor, batched keep-alive, `get_sales_by_lender`, self-contained events |
 | Testnet | `CCHVG565ABRRCZCVBZLO3FM42EILZXQMT62HKRT7DMGJUATOJSVQZ7RB` | **Retired** 2026-10-01. Lending lifecycle with sale records |
 | Testnet | `CAZJUMEN2JMUT7HUNRUXC6ABSX5M2UOZ3RIBJPRYATHIA7L2QOUHKTET` | **Retired** 2026-09-30. First lending build |
+
+The current deployment was built with stellar-cli 27.0.0. Building the same
+source with 28.1.0 (the version CI and this repo now use) gives a different
+Wasm hash only because the CLI records its own version in the Wasm's
+`contractmetav0` section (`cliver`); with that entry removed the two are
+byte-identical. To reproduce `82070b2c…` exactly, build with 27.0.0.
 
 Each deployment is fresh; no state is carried over between them. **Retired** deployments still exist on Testnet but are not used by the backend: send nothing to them, and index only the current one. Their records are kept as `deployments/testnet.v1.*` (`CBTFO2N4…`), `deployments/testnet.v2.*` (`CDLSGBNI…`) and `deployments/testnet.v2b.*` (`CB3PY2P5…`), marked `"status": "retired"`.
 
@@ -225,7 +274,7 @@ SHA-256.
 |---|---|---|
 | Rust | pinned in `rust-toolchain.toml` | [rustup.rs](https://rustup.rs) |
 | `wasm32v1-none` target | — | `rustup target add wasm32v1-none` |
-| stellar-cli | 28.1.0 in CI (27.0.0 also works) | `cargo install --locked stellar-cli --version 28.1.0` |
+| stellar-cli | 28.1.0, in CI and locally (27.0.0 built the current deployment; see Deployments). It warns that the networks run protocol 29: no release supports 29 yet | the prebuilt release binary, as CI does (`gh release download v28.1.0 --repo stellar/stellar-cli`), or `cargo install --locked stellar-cli --version 28.1.0` |
 | jq, python3 | any recent | for `scripts/` |
 
 ## Development

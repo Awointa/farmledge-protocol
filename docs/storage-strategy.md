@@ -715,11 +715,14 @@ deployment alongside it, not an upgrade. **No state is migrated**, and none
 can be: a receipt cannot be recreated on v3 without creating a second claim
 on the same grain.
 
-On Testnet the previous deployment (`CB3PY2P5…`) held only test and
-measurement receipts, so it was retired directly when v3 was deployed. The
-cutovers below are for a deployment holding real lots.
+**No dual-contract support is to be built — Testnet abandoned v2 and mainnet launches on v3.** On Testnet the previous deployment
+(`CB3PY2P5…`) held only test and measurement receipts, so it was abandoned
+when v3 was deployed: nothing migrates, nothing is pre-claimed, and the
+backend talks to v3 alone. The two cutovers below are kept **only as a
+reference**, for a future deployment that ever has to start on an older
+contract holding real lots. They describe nothing that is to be built now.
 
-### Testnet (and pilot) cutover
+### Testnet (and pilot) cutover (reference only)
 
 1. **Shadow period, at least two weeks.** v3 is deployed alongside the
    current contract and anchors daily with no mints, while deposits still
@@ -749,12 +752,11 @@ cutovers below are for a deployment holding real lots.
 re-adding the current contract's verifiers. After it, there is no rollback:
 v3 carries on, and the current contract drains.
 
-### Mainnet cutover
+### Mainnet cutover (reference only)
 
-Mainnet has not launched, and the plan is to launch it directly on v3, so
-no mainnet cutover is needed now. If mainnet launches on the current
-contract first, or for any future change of contract, the cutover is the
-same as on Testnet, **with live pledges, real lenders and receipts that
+Mainnet has not launched, and it launches directly on v3: no mainnet
+cutover is to be built. If a future deployment ever has to start on an
+older contract, the cutover is the same as on Testnet, **with live pledges, real lenders and receipts that
 cannot be recreated.**
 
 **What differs:**

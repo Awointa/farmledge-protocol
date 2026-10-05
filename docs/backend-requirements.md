@@ -11,12 +11,16 @@ is treated as a bug with the same priority as a contract bug.
 | 3. Anchoring job | `data_version` 3 | below |
 | 4. Farmer proof delivery | `data_version` 3 | below |
 | 5. Minted lots: the freeze, and governed on-chain after | `data_version` 3 | below |
-| 6. Cutover | once, at the switch to `data_version` 3 | below, and `docs/storage-strategy.md` ("Migration path") |
+| 6. Cutover | **not to be built** (reference only) | below |
 
 Items 3–6 belong to the A+B design in `docs/storage-strategy.md`. **The
 contract side is built** (`data_version` 3, deployed to Testnet); **the
 backend side is not built yet.** Until it is, nothing may mint on v3 outside
 tests.
+
+**v3 is the only contract the backend talks to.** **No dual-contract support is to be built — Testnet abandoned v2 and mainnet launches on v3.** The v2 Testnet
+deployment held only test data and is retired; nothing reads, indexes or
+keeps it alive. Item 6 is kept only as a reference.
 
 ## 3. Anchoring job
 
@@ -34,14 +38,23 @@ tests.
 - **Persist every leaf, salt, proof and root** before delivering anything.
   They fall under the indexer's archive and backup rules: the leaf data is
   stored nowhere else.
-- **Alert** if any warehouse's day is not anchored within 2 hours of the
-  cutoff. The contract accepts a day only if it is after the last anchored
-  one and not after the ledger's current UTC day. A missed day can still be
-  anchored late, but only until a later day is: anchor days strictly in
-  order, and never skip one to catch up.
-- **Until a warehouse's day is anchored, nothing in it can mint:** a mint
-  must use the latest anchored day, so a late anchor delays pledges; it is
-  never unsafe.
+- **A missed anchor is an urgent alert, not a routine one.** Nothing in a
+  warehouse can mint until its latest day is anchored, and once its last
+  root expires (30 days without an anchor) nothing can mint at all. During a
+  single-warehouse trial a quietly failing job blocks every pledge, with no
+  obvious cause. So:
+  - **page** the on-call engineer if any warehouse's day is not anchored
+    within **2 hours** of the cutoff, and **escalate** at **24 hours**;
+  - raise a **separate urgent alert** for any warehouse with **no anchor in
+    7 days**, well before the 30-day limit;
+  - **in the pledge flow,** a mint refused with `StaleLeaf` or `NoAnchor`
+    is reported as "the warehouse's books are not anchored for today",
+    naming the warehouse and its last anchored day, never as a generic
+    failure.
+- **Anchor days strictly in order.** The contract accepts a day only if it
+  is after the last anchored one and not after the ledger's current UTC
+  day. A missed day can still be anchored late, but only until a later day
+  is: never skip one to catch up.
 - **Deposit numbers** are a per-warehouse sequence. They are assigned once,
   at intake, and are never reused or reassigned. One physical lot has
   exactly one number. Each day's tree must hold one deposit leaf per new
@@ -125,7 +138,11 @@ cutoff.** Freshness in that window is this backend's invariant:
 - **Alert** whenever an anchored balance for a minted lot differs from its
   receipt's on-chain weight. That means grain moved outside the contract.
 
-## 6. Cutover
+## 6. Cutover (reference only: not to be built)
+
+**No dual-contract support is to be built — Testnet abandoned v2 and mainnet launches on v3.** Nothing in this section is to be implemented. It is kept for a future
+deployment that ever has to start on an older contract holding real lots:
+then, and only then, the following applies.
 
 Once per switch of contract; the procedure, failure modes and the mainnet
 differences are in `docs/storage-strategy.md` ("Pre-claiming at cutover"

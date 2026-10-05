@@ -61,9 +61,11 @@ previous contract at cutover is **pre-claimed** on v3, so it can never be
 minted there. Such a lot stays on the previous contract for its whole life,
 new pledges included, and that contract drains as its lots exit. Re-minting
 it on v3 would put the same grain on two contracts, which is the
-double-financing hole pre-claiming exists to close (audit finding A19). The
-v2 → v3 cutover, for Testnet and mainnet, is in `docs/storage-strategy.md`
-("Migration path").
+double-financing hole pre-claiming exists to close (audit finding A19). **No
+dual-contract support is to be built — Testnet abandoned v2 and mainnet
+launches on v3.** The cutover in `docs/storage-strategy.md` ("Migration
+path") is kept only as a reference for a future deployment that ever starts
+on an older contract.
 
 The path below is the one for two contracts that both mint per deposit, as
 v1 and v2 did. When such a v2 contract is needed:

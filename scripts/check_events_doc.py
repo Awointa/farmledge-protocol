@@ -88,7 +88,8 @@ def deployed_events():
         if "event_v0" not in entry:
             continue
         e = entry["event_v0"]
-        out[e["prefix_topics"][0]] = [(p["name"], spec_type(p["type_"]),
+        # stellar-cli 27 names the key "type_", 28 "type".
+        out[e["prefix_topics"][0]] = [(p["name"], spec_type(p.get("type", p.get("type_"))),
                                        p["location"] == "topic_list") for p in e["params"]]
     return record["contract_id"], out
 

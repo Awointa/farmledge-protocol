@@ -382,8 +382,9 @@ on both networks. The 1,000/KB mainnet rate was cross-checked by simulating an
 extend on mainnet against a live entry. After removing the 15% safety margin
 RPC adds to simulated rent, which showed up on both networks, it gives the
 same rate. The settings were fetched with stellar-cli 27 against protocol 29
-networks. The CLI warns that it may miss newer settings, but the 0.1% match
-against charged fees shows nothing that affects rent was missed.
+networks (the `data_version` 3 snapshots with 28.1.0, which warns the same
+way). The CLI warns that it may miss newer settings, but the match against
+charged fees shows nothing that affects rent was missed.
 
 ## Measured cost per operation, before and after
 

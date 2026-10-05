@@ -152,9 +152,11 @@ leaf; nothing in the receipt comes from the caller.
 | deposit_no | | u64 | claimed without a mint |
 | claimed_at | | u64 | timestamp |
 
-Used once, at cutover, for lots still held as receipts on the previous
-contract (`docs/storage-strategy.md`, "Migration path"). These events are
-the published, checkable pre-claim list.
+Only for a cutover from an older contract holding real lots, where these
+events are the published, checkable pre-claim list
+(`docs/storage-strategy.md`, "Migration path"). **No such cutover is to be
+built** — Testnet abandoned v2 and mainnet launches on v3 — so on the
+current deployments the indexer should expect none, and alert on any.
 
 ## Receipt lifecycle
 
