@@ -8,15 +8,17 @@ is treated as a bug with the same priority as a contract bug.
 |---|---|---|
 | 1. Indexer: archive every event durably, alert when a day behind, check for gaps after outages, back up | now | `docs/events.md` ("Indexer requirements") |
 | 2. Keep-alive job: daily, 175-day bump, alert at 14 days left, never send `Exited` or `Revoked` ids | now | `docs/archival.md` ("The keep-alive job") |
-| 3. Anchoring job | from `data_version` 3 | below |
-| 4. Farmer proof delivery | from `data_version` 3 | below |
-| 5. Minted lots are governed on-chain | from `data_version` 3 | below |
-| 6. Cutover | once, at the switch to `data_version` 3 | `docs/storage-strategy.md` ("Migration path") |
+| 3. Anchoring job | `data_version` 3 | below |
+| 4. Farmer proof delivery | `data_version` 3 | below |
+| 5. Minted lots: the freeze, and governed on-chain after | `data_version` 3 | below |
+| 6. Cutover | once, at the switch to `data_version` 3 | below, and `docs/storage-strategy.md` ("Migration path") |
 
-Items 3–6 belong to the A+B design in `docs/storage-strategy.md` and are
-**not implemented yet**.
+Items 3–6 belong to the A+B design in `docs/storage-strategy.md`. **The
+contract side is built** (`data_version` 3, deployed to Testnet); **the
+backend side is not built yet.** Until it is, nothing may mint on v3 outside
+tests.
 
-## 3. Anchoring job (planned)
+## 3. Anchoring job
 
 - **Once a day per warehouse,** at a fixed UTC cutoff, build that day's tree
   from Postgres: one deposit leaf per intake, one dispatch leaf per
@@ -25,21 +27,27 @@ Items 3–6 belong to the A+B design in `docs/storage-strategy.md` and are
   receipt, with `receipt_id` set.
 - **Every leaf gets a fresh random 32-byte salt,** stored with the leaf and
   never reused.
-- **Submit the anchor** signed by a custodian registered for the warehouse,
-  and confirm it on-chain: the stored head equals the one computed locally.
-  Only then is the day anchored.
+- **Submit the anchor** (`anchor(custodian, warehouse_id, day, root,
+  leaves)`) signed by a custodian registered for the warehouse, and confirm
+  it on-chain: `get_anchor` returns the head computed locally,
+  `sha256(prev_head ‖ day ‖ leaves ‖ root)`. Only then is the day anchored.
 - **Persist every leaf, salt, proof and root** before delivering anything.
   They fall under the indexer's archive and backup rules: the leaf data is
   stored nowhere else.
 - **Alert** if any warehouse's day is not anchored within 2 hours of the
-  cutoff. Days must be anchored in order and cannot be anchored later out of
-  order, so a missed day is anchored late, never skipped.
+  cutoff. The contract accepts a day only if it is after the last anchored
+  one and not after the ledger's current UTC day. A missed day can still be
+  anchored late, but only until a later day is: anchor days strictly in
+  order, and never skip one to catch up.
+- **Until a warehouse's day is anchored, nothing in it can mint:** a mint
+  must use the latest anchored day, so a late anchor delays pledges; it is
+  never unsafe.
 - **Deposit numbers** are a per-warehouse sequence. They are assigned once,
   at intake, and are never reused or reassigned. One physical lot has
   exactly one number. Each day's tree must hold one deposit leaf per new
   number, with no gaps. A reconciliation check enforces both.
 
-## 4. Farmer proof delivery (planned)
+## 4. Farmer proof delivery
 
 Automatic, never on request. For every deposit and every dispatch:
 
@@ -50,8 +58,11 @@ Automatic, never on request. For every deposit and every dispatch:
    the farmer receives the full proof bundle (format in `docs/events.md`,
    "Farmer proofs"):
    - by SMS, as a link to a page that shows the bundle as a QR code and a
-     file, needs no login, and checks the proof **in the browser against a
-     public Stellar RPC**, never against Farmledge's API;
+     downloadable file, needs no login, and checks the proof **in the
+     browser against a public Stellar RPC**, never against Farmledge's API.
+     The page is a convenience: the bundle file is the proof, and anyone
+     can check it without Farmledge using the standalone script in
+     `docs/events.md`;
    - printed as a QR code at the warehouse, on request, on the next visit
      and on every dispatch slip.
 3. **Every month,** a statement with a balance proof for each active lot, so
@@ -63,16 +74,74 @@ Delivery is part of the anchoring job's definition of done:
 - **Alert** if any leaf's bundle has not been delivered within 24 hours of
   its anchor.
 - **Retry** failed SMS, and record a delivery receipt for each bundle.
-- **Publish** a standalone open-source verifier, and the bundle
-  specification, so lenders and farmers' representatives can check proofs
-  without Farmledge.
+- **Publish** the standalone verifier (`scripts/verify_proof.py`, also
+  reproduced in `docs/events.md`) and the bundle format, so lenders and
+  farmers' representatives can check proofs without Farmledge. **No
+  verification path may depend on Farmledge's API, database or website.**
+- A bundle older than 30 days needs `later_days` (the `anchored` events
+  after its day) to be checked: serve them publicly from the event archive,
+  and include them in every monthly statement. They need not be trusted;
+  the chain checks them.
 
-## 5. Minted lots are governed on-chain (planned)
+## 5. Minted lots: the freeze, and governed on-chain after
 
-- **Minting takes the lot's balance leaf from the latest anchored day,** and
-  its proof. Off-chain dispatch of a lot is **frozen** from the moment a
-  mint is requested until the mint confirms or is abandoned.
-- **After minting,** every dispatch of that lot goes through the contract's
-  `exit`, never off-chain. Its balance leaves carry the receipt id.
+The contract accepts a balance leaf only from the warehouse's latest
+anchored day, but **it cannot see a dispatch recorded after that day's
+cutoff.** Freshness in that window is this backend's invariant:
+
+> No dispatch of a lot may be recorded between the cutoff of the anchored
+> day its mint uses and the moment that mint is confirmed or definitively
+> abandoned.
+
+- **Freeze first.** In one database transaction: lock the lot's row; refuse
+  if any dispatch of it is recorded after the latest anchored day's cutoff
+  (mint after the next anchor instead); set `frozen_for_mint`; write the
+  mint request as `pending`. Build the mint transaction only after this
+  commits. **If the freeze cannot be written, nothing is submitted.**
+- **Dispatch checks the freeze** in the same transaction that records the
+  dispatch, and refuses while it is set. If it cannot read the freeze state
+  it refuses: fail closed.
+- **Store the signed transaction and its hash before submitting,** with a
+  5-minute `max_time`.
+- **Confirmed:** record the `receipt_id`; from then on every dispatch of
+  the lot goes through the contract's `exit`, never off-chain, and its
+  balance leaves carry the receipt id. The freeze is never lifted.
+- **Unfreeze only on a definite failure:** `FAILED`, never submitted, or
+  `max_time` passed and RPC confirms the transaction is absent.
+- **After a crash,** resolve every `pending` request before dispatch
+  reopens for its lot: no stored hash, unfreeze; a stored hash, look it up
+  with `getTransaction` and complete or unfreeze as above. Never unfreeze
+  while the transaction could still land.
+- **Reconcile, after every anchor and for every `minted` event,** and page
+  on any hit (details in `docs/storage-strategy.md`, "The freshness
+  invariant"):
+  - no `anchored` event before the mint's ledger has a day later than
+    `minted.anchor_day`;
+  - no dispatch of the lot is recorded, in the database or as a dispatch
+    leaf in later anchored books, between `anchor_day`'s cutoff and
+    `minted_at`;
+  - the lot's first balance leaf after the mint carries the receipt id, and
+    its `kg` equals the receipt's weight less any on-chain exits.
 - **Alert** whenever an anchored balance for a minted lot differs from its
   receipt's on-chain weight. That means grain moved outside the contract.
+
+## 6. Cutover
+
+Once per switch of contract; the procedure, failure modes and the mainnet
+differences are in `docs/storage-strategy.md` ("Pre-claiming at cutover"
+and "Migration path"). The backend's part:
+
+- **Stop minting on the old contract on-chain** by removing its verifiers,
+  and confirm before building the pre-claim list.
+- **Build the list from the chain:** every `Active`, `Locked` or `Recovery`
+  receipt of the old contract, mapped to its lot's `deposit_no`. Every live
+  receipt maps to exactly one number.
+- **Diff** the list against the old contract's live receipts and against
+  the lots in v3's first books with `receipt_version` set. Any difference
+  stops the cutover.
+- **Publish, review, submit** (`preclaim`, 25 a call), then **verify**
+  with `is_claimed` and the `preclaimed` events.
+- **Gate:** no v3 mint for a warehouse until its pre-claim is verified.
+- **For the whole overlap:** index and keep alive both contracts, and
+  reconcile every v3 `minted` event against the old contract's live
+  receipts daily.

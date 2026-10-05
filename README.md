@@ -9,31 +9,33 @@ contract per commodity.
 
 ## Current state
 
-The deposit-to-exit lifecycle (`mint`, `exit`, `revoke`, the registries),
-the lending lifecycle (`lock`, `unlock`, `extend_due`, `start_recovery`,
-`complete_recovery`, `record_settlement`) and the rent keep-alive calls
-(`extend_ttl`, `extend_ttl_batch`, `extend_index_ttl`) are implemented,
-tested and deployed to Testnet.
+Daily anchoring of each warehouse's books (`anchor`), minting on demand
+from them (`mint_from_anchor`, `preclaim`), the deposit-to-exit lifecycle
+(`exit`, `revoke`, the registries), the lending lifecycle (`lock`, `unlock`,
+`extend_due`, `start_recovery`, `complete_recovery`, `record_settlement`)
+and the rent keep-alive calls (`extend_ttl`, `extend_ttl_batch`,
+`extend_index_ttl`) are implemented, tested and deployed to Testnet as
+`data_version` 3. **The contract is frozen** until field use gives a reason
+to change it.
 
 The contract is **immutable**: nothing can replace its Wasm, and changes ship
 as a new deployment. See [docs/upgrade.md](docs/upgrade.md).
 
-**The storage strategy is under review.** We are evaluating three changes:
-minting a receipt only when it is first pledged (about 30% of deposits),
-anchoring the inventory layer with a daily Merkle root instead of a receipt
-per deposit, and aggregating entries per farmer and commodity. Together they
-could cut rent by roughly 90%. **Treat the current per-deposit mint, and the
-costs that follow from it, as provisional, not settled.** The evaluation, with
-measured costs, is in [docs/storage-strategy.md](docs/storage-strategy.md). Today's costs, and the
-assumption behind them (every deposit mints a receipt that pays rent for
-9–12 months), are in [docs/archival.md](docs/archival.md).
+**A deposit is not a receipt.** Each warehouse's books (deposits,
+dispatches, end-of-day balances) are committed on-chain once a day as a
+Merkle root, and a receipt is minted only when a lot is pledged, from its
+balance leaf in the latest anchored day, with a proof. Farmers hold proofs of
+their unpledged lots, checkable against the chain without Farmledge. Why,
+the audit behind it and the cutover plans are in
+[docs/storage-strategy.md](docs/storage-strategy.md); measured costs in
+[docs/archival.md](docs/archival.md).
 
 | Document | What it is |
 |---|---|
 | [docs/events.md](docs/events.md) | Every event, field and type, the transition that emits it, and the indexer's correctness requirements. **The contract between protocol and backend.** |
 | [docs/archival.md](docs/archival.md) | Storage rent, the keep-alive job, the restore path, and measured costs for Testnet and mainnet |
-| [docs/storage-strategy.md](docs/storage-strategy.md) | Design evaluation, not implemented: what to keep on-chain (mint on demand, daily anchoring, aggregated lots, minimal chain), with measured costs and what each lets a lender verify |
-| [docs/backend-requirements.md](docs/backend-requirements.md) | What the backend must do for the protocol to be correct: indexer, keep-alive, and, from `data_version` 3, anchoring and farmer proof delivery |
+| [docs/storage-strategy.md](docs/storage-strategy.md) | What to keep on-chain and why (A+B, implemented as `data_version` 3), the audit of every check, the freshness invariant, pre-claiming, and the Testnet and mainnet cutover plans |
+| [docs/backend-requirements.md](docs/backend-requirements.md) | What the backend must do for the protocol to be correct: indexer, keep-alive, anchoring, farmer proof delivery, the mint freeze, cutover |
 | [docs/upgrade.md](docs/upgrade.md) | Why the contract is immutable, and the migration path |
 | [docs/adversarial-review.md](docs/adversarial-review.md) | Every way a farmer or lender could lose what they are owed, and the test that prevents it |
 
@@ -49,13 +51,14 @@ source of truth for the backend.
 
 | Network | Contract ID | Notes |
 |---|---|---|
-| Testnet | `CB3PY2P5ZJ5TQIUEAZRGXOYKXKAZZVAMXCRG25GRWLURTKMKNXKYFPEM` | **Current.** `data_version` 2: compact storage, splits in place, finished receipts left to archive, 64-byte caps on `deposit_id` and the lending refs. Deployed 2026-10-04 |
+| Testnet | `CBW6TA5UJMXJY2VYPJV6WUVWNUP3PKZNPXFMC2CNVCWZDF3SKIT4UAIN` | **Current.** `data_version` 3: daily anchoring of each warehouse's books, receipts minted on demand from an anchored balance leaf (`mint_from_anchor`), the deposit-number claim bitmap and `preclaim`; `mint` and the `DepositIndex` guard removed. Deployed 2026-10-05 |
+| Testnet | `CB3PY2P5ZJ5TQIUEAZRGXOYKXKAZZVAMXCRG25GRWLURTKMKNXKYFPEM` | **Retired** 2026-10-05. `data_version` 2: compact storage, splits in place, finished receipts left to archive, 64-byte caps on `deposit_id` and the lending refs. Held only test and measurement receipts |
 | Testnet | `CDLSGBNISQ7F3ROSEE5MHAZEZYNUV5LOGQA2EWTP4BPODLQT4G2LZJW3` | **Retired** 2026-10-04. As current, but without the `deposit_id` cap. The `data_version` 2 costs in `docs/archival.md` were measured on it |
 | Testnet | `CBTFO2N4A7ILUX6H72FFZOGWF62ZCAKB4I6X6CI52Q2522DVNKECW6KU` | **Retired** 2026-10-03. `data_version` 1: immutable build with a constructor, batched keep-alive, `get_sales_by_lender`, self-contained events |
 | Testnet | `CCHVG565ABRRCZCVBZLO3FM42EILZXQMT62HKRT7DMGJUATOJSVQZ7RB` | **Retired** 2026-10-01. Lending lifecycle with sale records |
 | Testnet | `CAZJUMEN2JMUT7HUNRUXC6ABSX5M2UOZ3RIBJPRYATHIA7L2QOUHKTET` | **Retired** 2026-09-30. First lending build |
 
-Each deployment is fresh; no state is carried over between them. **Retired** deployments still exist on Testnet but are not used by the backend: send nothing to them, and index only the current one. Their records are kept as `deployments/testnet.v1.*` (`CBTFO2N4…`) and `deployments/testnet.v2.*` (`CDLSGBNI…`), marked `"status": "retired"`.
+Each deployment is fresh; no state is carried over between them. **Retired** deployments still exist on Testnet but are not used by the backend: send nothing to them, and index only the current one. Their records are kept as `deployments/testnet.v1.*` (`CBTFO2N4…`), `deployments/testnet.v2.*` (`CDLSGBNI…`) and `deployments/testnet.v2b.*` (`CB3PY2P5…`), marked `"status": "retired"`.
 
 ## Receipt state machine
 
@@ -73,6 +76,7 @@ Each deployment is fresh; no state is carried over between them. **Retired** dep
 
 | From | To | Via |
 |---|---|---|
+| (none) | Active | `mint_from_anchor`, from the lot's balance leaf in the latest anchored day |
 | Active | Locked | `lock` |
 | Active | Exited | `exit` |
 | Active | Revoked | `revoke` |
@@ -112,7 +116,9 @@ every later lending call authorises the lender **recorded in the lock**.
 
 | Function | Must sign | Also required |
 |---|---|---|
-| `mint` | custodian **and** verifier | custodian registered for the warehouse; verifier registered; `deposit_id` unused and at most `MAX_REF_LEN` (64) bytes |
+| `anchor` | custodian | custodian registered for the warehouse; `last anchored day < day ≤ ledger day`; 1 to 2^20 leaves |
+| `mint_from_anchor` | custodian **and** verifier | custodian registered for the leaf's warehouse; verifier registered; a version-1 balance leaf from the warehouse's latest anchored day, naming no receipt, whose proof folds to that day's root at exactly the tree's depth; `(warehouse_id, deposit_no)` never claimed; weight, moisture and `deposit_id` (≤ 64 bytes) valid. Every receipt field comes from the leaf |
+| `preclaim` | admin | warehouse registered; at most 25 numbers, none already claimed (all-or-nothing) |
 | `exit` | custodian **and** owner | custodian registered for the receipt's warehouse; status `Active` |
 | `revoke` | admin | status `Active` |
 | `extend_ttl`, `extend_ttl_batch`, `extend_index_ttl` | nobody | at most `MAX_TTL_BATCH` (25) receipts or pages per call; `Exited` and `Revoked` receipts are skipped |
@@ -126,7 +132,8 @@ every later lending call authorises the lender **recorded in the lock**.
 
 Lenders are not registered: any address can lend. Recovery operators are.
 The buyer in `complete_recovery` does not sign — like the farmer at mint,
-they are the beneficiary.
+they are the beneficiary. Reads (`get_*`, `leaf_hash`, `verify_leaf`,
+`is_claimed`, `data_version`, the page counts) need no signature.
 
 The rule that only scale-weighed receipts can be pledged lives in one
 function, `lending::require_scale_weight`.
@@ -268,7 +275,7 @@ lines.
    `stellar contract info interface --id $CONTRACT_ID --network testnet`
    fails, and `getLedgerEntries` on the instance key returns nothing. The
    latest ledger sequence also drops far below the recorded `start_ledger`.
-   Stop the writers (mint, lock and exit jobs) as soon as either check fires.
+   Stop the writers (anchor, mint, lock and exit jobs) as soon as either check fires.
 2. **Redeploy:** run `scripts/deploy.sh` with the registry file, or have
    protocol ops run it, and read the new record.
 3. **Swap the contract id** in configuration: `contract_id`,
@@ -292,25 +299,27 @@ lines.
    id with `ReceiptNotFound` rather than skipping it.
 8. **Re-mint nothing automatically.** Testnet receipts are not legal records
    (SDD §11.1), and inventing them would break the "no invented data" rule.
-   If the inventory trial is running on Testnet at the time, re-capture from
-   the warehouse's paper records through the normal mint flow, with fresh
-   `deposit_id`s.
+   If the inventory trial is running on Testnet at the time, re-anchor the
+   books from the database on the new contract (it starts a fresh chain per
+   warehouse) and mint only what is pledged, through the normal flow.
 
 ## Repository layout
 
 ```
 contracts/receipt/src/
 ├── lib.rs        contract entry points
+├── anchor.rs     anchor / mint_from_anchor / preclaim / Merkle proofs
 ├── lending.rs    lock / unlock / extend_due / recovery / record_settlement
 ├── split.rs      the one place a receipt is divided
-├── types.rs      Receipt, Lock, Recovery, Sale, Status, WeightSource
+├── types.rs      Receipt, Leaf, AnchorHead, Lock, Recovery, Sale, Status, WeightSource
 ├── errors.rs     contract Error enum (codes are public ABI; never renumber)
 ├── events.rs     typed #[contractevent] structs
-├── storage.rs    DataKey layout, TTL bumps, paged indexes
+├── storage.rs    DataKey layout, TTL bumps, paged indexes, claim bitmap, anchors
 ├── admin.rs      admin and the warehouse/custodian/verifier/operator registries
 └── test/         per-area tests, adversarial cases, property tests
-docs/             events, archival, upgrade, adversarial review
-scripts/          deploy.sh (one-command deploy), measure_costs.py (Testnet costs)
+docs/             events, archival, storage strategy, backend requirements, upgrade, adversarial review
+scripts/          deploy.sh, measure_costs.py (Testnet costs), cost_model.py,
+                  verify_proof.py (standalone proof check), check_events_doc.py
 deployments/      the current deployment record per network
 ```
 
@@ -322,9 +331,11 @@ deployments/      the current deployment record per network
 - **Time** is the ledger timestamp. `due_date` and `grace_period` are seconds
   supplied by the lender; the contract enforces ordering, not policy.
 - **Moisture** is basis points of a percent (`1250` = 12.50%).
-- **`receipt_id`** is contract-assigned and distinct from the client's
-  `deposit_id`, which guards against duplicate mints.
-- **Rent:** receipts need a keep-alive job calling `extend_ttl_batch`, because
+- **`receipt_id`** is contract-assigned. A lot's identity is its
+  per-warehouse `deposit_no`, assigned once by the backend at intake; the
+  claim bitmap keyed on `(warehouse_id, deposit_no)` makes each lot mint at
+  most once, ever. `deposit_id` is the human reference.
+- **Rent:** minted receipts need a keep-alive job calling `extend_ttl_batch`, because
   no single bump covers a receipt's 6–12 month life. Schedule, restore path
   and measured costs are in [docs/archival.md](docs/archival.md).
 - **`data_version`** is stamped on every `Receipt` and `Sale`; see

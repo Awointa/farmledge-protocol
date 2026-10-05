@@ -1,30 +1,34 @@
 # Receipt contract events
 
-This file is the contract between the protocol and the backend indexer. If
-it disagrees with `contracts/receipt/src/events.rs`, the code is right and
-this file is a bug. Change both in the same commit.
+This file is the contract between the protocol and the backend indexer, for
+the deployment with `data_version` 3. If it disagrees with
+`contracts/receipt/src/events.rs`, the code is right and this file is a bug.
+Change both in the same commit; `scripts/check_events_doc.py` compares the
+two and fails on any difference in events, fields, types or topics.
 
 ## Indexer requirements: a correctness requirement, not an operational nicety
 
-Since `data_version` 2 the chain stores only each receipt's **current**
-weight. A partial exit, lock or unlock reduces the receipt in place, and the
-only record of what it weighed before is the `split` event. RPC providers
-keep events for about 7 days. After that, a missed event can only be
-recovered by replaying ledger history from Stellar's history archives
-(Galexie or captive core), which is slow and costly: treat it as disaster
-recovery, not a fallback. **If the indexer loses a `split` event, the
-history of that receipt's weight is lost.** Finished (`Exited`, `Revoked`)
-receipts are also left to archive on-chain, so the event archive is their
-practical record too.
+The chain stores only each receipt's **current** weight. A partial exit,
+lock or unlock reduces the receipt in place, and the only record of what it
+weighed before is the `split` event. A day's Merkle root is stored on-chain
+for 30 days only; after that **the `anchored` event is the only record of
+the root**, and without it no proof for that day can be checked against the
+chain except by replaying ledger history. RPC providers keep events for about
+7 days. After that, a missed event can only be recovered by replaying ledger
+history from Stellar's history archives (Galexie or captive core), which is
+slow and costly: treat it as disaster recovery, not a fallback. Finished
+(`Exited`, `Revoked`) receipts are also left to archive on-chain, so the
+event archive is their practical record too.
 
 The indexer must therefore meet all four of these. Failing any of them is a
 data-loss bug, to be treated with the same priority as a contract bug.
 
-1. **Archive every event durably, `split` above all.** Write each event of
-   this contract (raw XDR plus ledger sequence, transaction hash and event
-   index) to durable storage **before** advancing the ingestion cursor.
-   Writes are idempotent on (ledger, transaction hash, event index), so
-   re-ingesting a range is always safe. Never prune the archive.
+1. **Archive every event durably, `split` and `anchored` above all.** Write
+   each event of this contract (raw XDR plus ledger sequence, transaction
+   hash and event index) to durable storage **before** advancing the
+   ingestion cursor. Writes are idempotent on (ledger, transaction hash,
+   event index), so re-ingesting a range is always safe. Never prune the
+   archive.
 2. **Alert if indexing falls more than one day behind.** Page when the last
    ledger indexed is more than 17,280 ledgers (about 24 hours) behind the
    network's latest ledger. That leaves about 6 days of RPC retention to
@@ -33,14 +37,19 @@ data-loss bug, to be treated with the same priority as a contract bug.
    database or its RPC provider. Confirm that the indexed ledgers cover every
    ledger from the deployment's `start_ledger` (in `deployments/<network>.json`)
    to the cursor without a hole, and re-fetch any gap with `getEvents` while
-   it is still inside RPC retention. Then reconcile: for each receipt touched
-   in the outage window, the minted weight minus every `taken_weight_kg`
-   split off it (following `parent_id`) must equal its current weight from
-   `get_receipt`.
+   it is still inside RPC retention. Then reconcile:
+   - for each receipt touched in the outage window, the `minted` weight
+     minus every `taken_weight_kg` split off it (following `parent_id`) must
+     equal its current weight from `get_receipt`;
+   - for each warehouse, recomputing the head from its archived `anchored`
+     events (`head = sha256(prev_head ‖ day ‖ leaves ‖ root)`, each event's
+     `prev_head` equal to the previous event's `head`) must give the head
+     `get_anchor` returns now. A break means an `anchored` event is missing.
 4. **Back up the archive.** Off-site, on a schedule, with restores tested.
    The backup is the second copy of data that exists nowhere else.
 
-The same requirements are stated in `docs/archival.md` and the README.
+The same requirements are stated in `docs/archival.md`,
+`docs/backend-requirements.md` and the README.
 
 ## Encoding
 
@@ -54,17 +63,19 @@ Every event is a `#[contractevent]` struct:
   field. Map keys are sorted, so read the data **by name, never by position**.
 
 Types are Soroban types: `u64`/`u32` integers, `Address` (`G…` or `C…`
-strkey), `Symbol`, `String`, `Option<T>` (absent = `void`), `bool`. `Status`
-is a unit enum, encoded as a one-element vector holding its variant name,
-e.g. `["Locked"]`. All timestamps are **ledger timestamps in Unix seconds**,
-taken from the ledger that included the transaction.
+strkey), `Symbol`, `String`, `BytesN<32>` (32 raw bytes, an `ScBytes`),
+`Option<T>` (absent = `void`), `bool`. `Status` and `WeightSource` are unit
+enums, encoded as a one-element vector holding the variant name, e.g.
+`["Locked"]`, `["Scale"]`. All timestamps are **ledger timestamps in Unix
+seconds**, taken from the ledger that included the transaction. A `day` is a
+UTC day number: Unix seconds ÷ 86,400, rounded down.
 
 ### Self-containment rule
 
 Every receipt or sale event carries `receipt_id` (or `sale_id`), `owner`,
 `warehouse_id`, a quantity in kg and a timestamp. Lending events also carry
 `lender`. The indexer never has to read state back to apply an event. The
-registry events below carry their subject and a timestamp.
+anchoring and registry events carry their subject and a timestamp.
 
 The quantity field is named `weight_kg` on events that describe the receipt
 itself (`minted`, `exited`, `revoked`, `ttl_extended`) and `kg` on lending
@@ -85,27 +96,67 @@ earlier weight. See [Indexer requirements](#indexer-requirements-a-correctness-r
 
 `extend_ttl_batch` emits one `ttl_extended` per receipt it keeps alive, in
 the order the ids were given. `Exited` and `Revoked` receipts are skipped and
-emit nothing.
+emit nothing. `preclaim` emits one `preclaimed` per number, in the order
+given.
 
-## Receipt lifecycle
+## Anchoring and minting
 
-### `minted`: Active, newly created (`mint`)
+### `anchored`: a warehouse's day is committed (`anchor`)
+
+| field | T | type | notes |
+|---|---|---|---|
+| warehouse_id | T | Symbol | |
+| day | | u32 | UTC day; strictly after the warehouse's previous anchored day, never after the ledger's day |
+| leaves | | u32 | leaf count of the day's tree, 1 to 2^20; fixes the proof depth, `ceil(log2(leaves))` |
+| root | | BytesN<32> | Merkle root of the day's leaves |
+| prev_head | | BytesN<32> | the head before this anchor; 32 zero bytes on the warehouse's first |
+| head | | BytesN<32> | `sha256(prev_head ‖ day ‖ leaves ‖ root)`, `day` and `leaves` as 4-byte big-endian |
+| custodian | | Address | who signed the anchor |
+| anchored_at | | u64 | timestamp |
+
+The root is stored on-chain (temporary storage) for 30 days, then
+deleted by the network. **This event is then the only record of it.**
+
+### `minted`: Active, newly created (`mint_from_anchor`)
 
 | field | T | type | notes |
 |---|---|---|---|
 | receipt_id | T | u64 | contract-assigned, starts at 1 |
-| warehouse_id | T | Symbol | |
-| deposit_id | | String | client intake reference, unique per mint |
+| warehouse_id | T | Symbol | the leaf's |
+| deposit_no | | u64 | the lot's identity; each `(warehouse_id, deposit_no)` mints once, ever |
+| deposit_id | | String | the lot's intake reference, at most 64 bytes |
 | owner | | Address | the farmer |
 | commodity | | Symbol | e.g. `MAIZE_WHITE` |
 | grade | | Symbol | |
-| weight_kg | | u64 | book weight |
+| weight_kg | | u64 | book weight: the leaf's `kg` |
 | weight_source | | WeightSource | `["Scale"]` or `["BagEstimate"]` |
 | bag_count | | u32 | |
 | moisture_pct | | u32 | basis points of a percent (1250 = 12.50%) |
-| custodian | | Address | co-signer |
-| verifier | | Address | co-signer |
-| deposit_date | | u64 | timestamp |
+| custodian | | Address | attested the **intake** (from the leaf) |
+| verifier | | Address | countersigned the **intake** (from the leaf) |
+| deposit_date | | u64 | when the lot was taken in (the leaf's `deposited_at`), not the mint time |
+| minted_by_custodian | | Address | signed the mint |
+| minted_by_verifier | | Address | signed the mint |
+| anchor_day | | u32 | the day of the balance leaf minted from: always the warehouse's latest anchored day at the time |
+| leaf_hash | | BytesN<32> | that leaf's hash, so the receipt can be checked against the anchored books |
+| minted_at | | u64 | timestamp |
+
+Every field from `deposit_no` to `deposit_date` is copied from the proven
+leaf; nothing in the receipt comes from the caller.
+
+### `preclaimed`: a deposit number can never be minted (`preclaim`, admin)
+
+| field | T | type | notes |
+|---|---|---|---|
+| warehouse_id | T | Symbol | |
+| deposit_no | | u64 | claimed without a mint |
+| claimed_at | | u64 | timestamp |
+
+Used once, at cutover, for lots still held as receipts on the previous
+contract (`docs/storage-strategy.md`, "Migration path"). These events are
+the published, checkable pre-claim list.
+
+## Receipt lifecycle
 
 ### `split`: the parent is reduced in place and one receipt is created (inside a partial `exit` / `lock` / `unlock`)
 
@@ -125,7 +176,7 @@ emit nothing.
 | remainder_bag_count | | u32 | |
 | split_at | | u64 | timestamp |
 
-The new receipt also inherits `deposit_id`, `commodity`, `grade`,
+The new receipt also inherits `deposit_id`, `deposit_no`, `commodity`, `grade`,
 `weight_source`, `moisture_pct`, `custodian`, `verifier`, `deposit_date`, the
 lock terms and recovery history, which the indexer already holds for the
 parent. Taken and remainder bag counts sum to the parent's before the split.
@@ -286,7 +337,9 @@ Each event has its subject as a topic and a timestamp in the data.
 
 | transition | call | events, in order |
 |---|---|---|
-| (none) → Active | `mint` | `minted` |
+| warehouse's day committed | `anchor` | `anchored` |
+| (none) → Active | `mint_from_anchor` | `minted` |
+| deposit numbers claimed, no receipt | `preclaim` | `preclaimed` × n |
 | Active → Exited | `exit` (full) | `exited` |
 | Active (reduced) + new Exited receipt | `exit` (partial) | `split`, `exited` |
 | Active → Revoked | `revoke` | `revoked` |
@@ -302,89 +355,246 @@ Each event has its subject as a topic and a timestamp in the data.
 | Sale unsettled → settled | `record_settlement` | `settlement_recorded` |
 | (none) | `extend_ttl`, `extend_ttl_batch` | `ttl_extended` × n, none for `Exited` / `Revoked` |
 | (none) | `extend_index_ttl` | (none) |
-| registry changes | `add_*` / `remove_*` | the matching registry event |
+| warehouse registered / removed | `add_warehouse` / `remove_warehouse` | `warehouse_added` / `warehouse_removed` |
+| custodian registered / removed | `add_custodian` / `remove_custodian` | `custodian_added` / `custodian_removed` |
+| verifier registered / removed | `add_verifier` / `remove_verifier` | `verifier_added` / `verifier_removed` |
+| recovery operator registered / removed | `add_recovery_operator` / `remove_recovery_operator` | `recovery_operator_added` / `recovery_operator_removed` |
 
-Deploying the contract runs its constructor, which emits nothing. The
-indexer should treat the deploy ledger as the start of history (see the
-README, "After a Testnet reset").
+A call that fails emits nothing and changes nothing. Deploying the contract
+runs its constructor, which emits nothing. The indexer should treat the
+deploy ledger as the start of history (see the README, "After a Testnet
+reset").
 
 ## Retention
 
 Stellar RPC keeps events for about 7 days. The indexer has to archive every
 event it ingests (SDD §7). If it falls behind by more than the retention
-window, rebuild from contract state: `get_receipts_by_owner`,
+window, rebuild receipts from contract state: `get_receipts_by_owner`,
 `get_receipts_by_warehouse`, `get_receipts_by_lender`, `get_sales_by_lender`
-and `get_unsettled_sales`, all paged at 64.
+and `get_unsettled_sales`, all paged at 64. **Anchors cannot be rebuilt from
+state:** the contract keeps only each warehouse's latest head
+(`get_anchor`) and the last 30 days' roots. Missing `anchored` events must
+be recovered from ledger history; the head tells you when the recovered set
+is complete.
 
-## Planned for `data_version` 3: anchors and farmer proofs (not implemented)
-
-Everything in this section is **design, not code**. It describes the A+B
-storage strategy (`docs/storage-strategy.md`) and becomes binding when that
-ships. Until then the rule at the top of this file still holds: the code is
-right.
-
-### `anchored` (planned): a warehouse's day is committed
-
-| field | T | type | notes |
-|---|---|---|---|
-| warehouse_id | T | Symbol | |
-| day | | u32 | days since 1970-01-01 UTC; strictly increasing per warehouse, never after the ledger's day |
-| root | | BytesN<32> | Merkle root of the day's leaves |
-| head | | BytesN<32> | `sha256(previous head ‖ day as 4 bytes, big-endian ‖ root)`; the first head uses 32 zero bytes as the previous one |
-| leaves | | u32 | leaf count, which fixes the proof depth |
-
-The indexer requirements above apply in full: `anchored` events are the only
-permanent record of past roots.
-
-### Farmer proofs
+## Farmer proofs
 
 Every deposit and dispatch delivers a **proof bundle** to the farmer,
-automatically (see `docs/backend-requirements.md`). A bundle proves one
-leaf: one deposit, one dispatch, or one lot's balance at the end of one day.
+automatically (see `docs/backend-requirements.md`). A bundle proves one leaf:
+one deposit, one dispatch, or one lot's balance at the end of one day.
 
-**Bundle contents:**
+**Verification never goes through Farmledge.** A bundle is checked against
+the chain, through any public Stellar RPC endpoint, with any tool that can
+compute SHA-256 and encode Stellar XDR. The script below needs nothing else:
+no Farmledge code, API, database or website. A verification page hosted by
+Farmledge is only a convenience; nothing about a proof depends on it, and a
+lender or a farmer's representative should run an independent check.
 
-| field | |
-|---|---|
-| `v` | bundle format version, 1 |
-| `network` | network passphrase |
-| `contract` | the receipt contract's id |
-| `leaf` | every field of the leaf, as specified in `docs/storage-strategy.md` (B: leaf format), including `salt` |
-| `proof` | the sibling hashes from the leaf up to the root, in order |
+### Bundle format
 
-The encoding (binary: the leaf's XDR followed by the raw proof hashes, then
-Base45 for an alphanumeric QR code) comes to about 1 KB for a warehouse of
-2,000 lots, which fits a QR code printed at about 4 cm. The exact encoding
-is fixed at implementation, and must decode with open tooling.
+A bundle is one JSON object:
 
-### Verifying a proof with nothing but the bundle and the chain
+| field | type | |
+|---|---|---|
+| `rpc` | string | a Stellar RPC endpoint; any public one will do, the verifier may override it |
+| `contract_id` | string | the receipt contract (`C…`). Check it against the published deployment, and its Wasm hash against the audited build: this is the one fact taken from outside the bundle |
+| `leaf` | object | every field of the leaf, below, including its `salt` |
+| `proof` | array of hex strings | sibling hashes from the leaf up to the root, in order |
+| `day_leaves` | number | the leaf count of the leaf's day (from its `anchored` event) |
+| `prev_head` | hex string | `prev_head` of the leaf's day's `anchored` event |
+| `later_days` | array | for every later anchored day of the warehouse, oldest first: `{"day", "leaves", "root"}` from its `anchored` event. Empty when the bundle is fresh |
 
-Anyone can do this with a public Stellar RPC endpoint and no access to
-Farmledge's API, database or website:
+The leaf, with the JSON type each field takes:
 
-1. **Check the contract.** It must be the published Farmledge contract,
-   with the audited Wasm hash. This is the one fact taken from outside the
-   bundle, and it is public.
-2. **Hash the leaf:** `sha256(0x00 ‖ XDR(leaf))`, where the XDR is the
-   leaf encoded as a Soroban `ScVal`. Any Stellar XDR library does this.
-   Alternatively, simulate the contract's `leaf_hash`, a free read that
-   needs no signature.
-3. **Fold the proof:** start from the leaf hash. For each sibling, if the
-   current position (`leaf.index`, halved at each level) is even, hash
-   `0x01 ‖ current ‖ sibling`, otherwise `0x01 ‖ sibling ‖ current`. The
-   result is the claimed root.
-4. **Compare with the chain:**
-   - **The leaf's day is within the last 30 days:** read the stored day root
-     for `(warehouse_id, day)` with `getLedgerEntries` and compare. Or
-     simulate the contract's `verify_leaf(leaf, proof)`. One call, free.
-   - **Older:** get the `anchored` events for that warehouse from the
-     leaf's day onwards from ledger history. Use `getEvents` within RPC
-     retention; beyond that, any full-history source (Stellar's public
-     history archives, or a public ledger data lake). Check that the
-     leaf's day carries the claimed root. Recompute the head forward through
-     every later day's root, and compare the result with the head the
-     contract stores now. The events need not be trusted: a wrong one cannot
-     reproduce the stored head.
+| field | Soroban type | JSON | |
+|---|---|---|---|
+| version | u32 | number | 1 |
+| kind | u32 | number | 0 deposit, 1 dispatch, 2 end-of-day balance |
+| warehouse_id | Symbol | string | |
+| day | u32 | number | UTC day of the tree |
+| index | u32 | number | position in the tree, **never an identity** |
+| deposit_no | u64 | number | the lot's identity |
+| deposit_id | String | string | the lot's intake reference |
+| receipt_id | u64 | number | receipt governing the lot, or 0 |
+| receipt_version | u32 | number | `data_version` of `receipt_id`'s contract, or 0 |
+| owner | Address | string | |
+| commodity, grade | Symbol | string | |
+| kg | u64 | number | deposited, dispatched or remaining |
+| weight_source | WeightSource | string | `"Scale"` or `"BagEstimate"` |
+| bags, moisture_bps | u32 | number | |
+| custodian, verifier | Address | string | who attested the intake |
+| deposited_at | u64 | number | intake time, the same on every leaf of a lot |
+| at | u64 | number | time of this leaf's event; the cutoff for a balance |
+| salt | BytesN<32> | hex string | random per leaf |
+
+The leaf is the contract's `Leaf` type; the same JSON is what
+`stellar contract invoke … -- leaf_hash --leaf '<json>'` takes.
+
+**Hashing.** leaf = `sha256(0x00 ‖ XDR(leaf as ScVal))`, where the ScVal is
+a map keyed by field name, keys sorted; node = `sha256(0x01 ‖ left ‖
+right)`; a tree is padded to a power of two with `sha256(0x00)`. Leaves are
+ordered by (kind, deposit_no). The 0x00 / 0x01 prefixes stop a leaf being
+passed off as a node.
+
+### Verifying a bundle: standalone script
+
+`scripts/verify_proof.py`, reproduced here in full so it can be copied out
+of this document. Python 3.8+, standard library only. Run it as
+`python3 verify_proof.py bundle.json [--rpc https://…]`.
+
+```python
+#!/usr/bin/env python3
+"""Check a Farmledge proof bundle against the Stellar chain, with nothing
+but Python's standard library and a public Stellar RPC.
+
+    python3 verify_proof.py bundle.json [--rpc URL]
+
+Exit 0: the leaf was in the warehouse's anchored books for its day.
+The bundle format is in docs/events.md ("Farmer proofs"). This file is
+copied verbatim into that document; it uses no Farmledge code or API.
+"""
+import base64, hashlib, json, struct, sys, urllib.request
+
+B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+
+def strkey(s):  # G... account or C... contract -> (kind, 32 bytes)
+    bits = "".join(format(B32.index(c), "05b") for c in s)
+    raw = bytes(int(bits[i:i + 8], 2) for i in range(0, len(bits) - 7, 8))
+    body, crc = raw[:-2], int.from_bytes(raw[-2:], "little")
+    c = 0
+    for byte in body:  # CRC16-XModem
+        c ^= byte << 8
+        for _ in range(8):
+            c = ((c << 1) ^ 0x1021 if c & 0x8000 else c << 1) & 0xFFFF
+    kind = {6 << 3: "account", 2 << 3: "contract"}.get(body[0])
+    if c != crc or kind is None or len(body) != 33:
+        sys.exit(f"bad address {s}")
+    return kind, body[1:]
+
+# --- XDR, just the ScVal types a leaf and its keys use ---------------------
+u32 = lambda n: struct.pack(">I", n)
+u64 = lambda n: struct.pack(">Q", n)
+opaque = lambda b: u32(len(b)) + b + b"\0" * (-len(b) % 4)
+
+def address(s):
+    kind, key = strkey(s)
+    return u32(0) + u32(0) + key if kind == "account" else u32(1) + key
+
+def sv(t, v):  # ScVal
+    if t == "u32": return u32(3) + u32(v)
+    if t == "u64": return u32(5) + u64(v)
+    if t == "bytes": return u32(13) + opaque(v)
+    if t == "string": return u32(14) + opaque(v.encode())
+    if t == "symbol": return u32(15) + opaque(v.encode())
+    if t == "address": return u32(18) + address(v)
+    if t == "vec": return u32(16) + u32(1) + u32(len(v)) + b"".join(v)
+    if t == "map":  # keys sorted, as the host requires
+        items = sorted(v.items())
+        return u32(17) + u32(1) + u32(len(items)) + b"".join(sv("symbol", k) + x for k, x in items)
+
+LEAF = {"version": "u32", "kind": "u32", "warehouse_id": "symbol", "day": "u32",
+        "index": "u32", "deposit_no": "u64", "deposit_id": "string", "receipt_id": "u64",
+        "receipt_version": "u32", "owner": "address", "commodity": "symbol",
+        "grade": "symbol", "kg": "u64", "bags": "u32", "moisture_bps": "u32",
+        "custodian": "address", "verifier": "address", "deposited_at": "u64",
+        "at": "u64", "salt": "bytes"}
+
+def leaf_xdr(leaf):
+    f = {k: sv(t, bytes.fromhex(leaf[k]) if t == "bytes" else leaf[k]) for k, t in LEAF.items()}
+    f["weight_source"] = sv("vec", [sv("symbol", leaf["weight_source"])])
+    return sv("map", f)
+
+def sha(*parts): return hashlib.sha256(b"".join(parts)).digest()
+
+def leaf_hash(leaf): return sha(b"\x00", leaf_xdr(leaf))
+
+def fold(h, index, proof):
+    for sib in proof:
+        h = sha(b"\x01", h, sib) if index % 2 == 0 else sha(b"\x01", sib, h)
+        index //= 2
+    return h
+
+def chain(prev, day, leaves, root): return sha(prev, u32(day), u32(leaves), root)
+
+# --- reading two entries from the chain -----------------------------------
+def entry(rpc, contract, key, durability):  # -> value ScVal bytes, or None
+    lk = u32(6) + address(contract) + key + u32(durability)
+    req = urllib.request.Request(rpc, json.dumps({"jsonrpc": "2.0", "id": 1,
+        "method": "getLedgerEntries", "params": {"keys": [base64.b64encode(lk).decode()]}}).encode(),
+        {"content-type": "application/json", "user-agent": "verify-proof/1"})
+    found = json.load(urllib.request.urlopen(req, timeout=30))["result"].get("entries") or []
+    if not found: return None
+    data = base64.b64decode(found[0]["xdr"])
+    # LedgerEntryData: type, ext, contract, key, durability, then the value.
+    prefix = u32(6) + u32(0) + address(contract) + key + u32(durability)
+    assert data.startswith(prefix), "unexpected entry layout"
+    return data[len(prefix):]
+
+def vec_of(val):  # a Vec of Bytes / U32 values -> python list
+    assert val[:8] == u32(16) + u32(1)
+    n, out, i = struct.unpack(">I", val[8:12])[0], [], 12
+    for _ in range(n):
+        t = struct.unpack(">I", val[i:i + 4])[0]
+        if t == 3: out.append(struct.unpack(">I", val[i + 4:i + 8])[0]); i += 8
+        elif t == 13:
+            ln = struct.unpack(">I", val[i + 4:i + 8])[0]
+            out.append(val[i + 8:i + 8 + ln]); i += 8 + ln + (-ln % 4)
+        else: raise ValueError(f"ScVal type {t}")
+    return out
+
+def main():
+    b = json.load(open(sys.argv[1]))
+    rpc = sys.argv[sys.argv.index("--rpc") + 1] if "--rpc" in sys.argv else b["rpc"]
+    leaf, proof = b["leaf"], [bytes.fromhex(p) for p in b["proof"]]
+    if len(proof) != (b["day_leaves"] - 1).bit_length() or leaf["index"] >= b["day_leaves"]:
+        sys.exit("FAIL: the proof does not fit a tree of day_leaves leaves")
+    root = fold(leaf_hash(leaf), leaf["index"], proof)
+    wh = sv("symbol", leaf["warehouse_id"])
+    print(f"leaf hash  {leaf_hash(leaf).hex()}\nroot       {root.hex()}")
+
+    stored = entry(rpc, b["contract_id"], sv("vec", [sv("symbol", "DayRoot"), wh, sv("u32", leaf["day"])]), 0)
+    if stored is not None:
+        on_chain_root, leaves = vec_of(stored)
+        ok = (on_chain_root, leaves) == (root, b["day_leaves"])
+        print(f"day root   {'matches' if ok else 'DIFFERS'} the root stored on-chain for day {leaf['day']}")
+        if not ok: sys.exit(1)
+
+    # The head commits to every anchored day: recompute it from this day on.
+    head = chain(bytes.fromhex(b["prev_head"]), leaf["day"], b["day_leaves"], root)
+    for d in b.get("later_days", []):
+        head = chain(head, d["day"], d["leaves"], bytes.fromhex(d["root"]))
+    stored = entry(rpc, b["contract_id"], sv("vec", [sv("symbol", "Head"), wh]), 1)
+    if stored is None: sys.exit("FAIL: the warehouse has no anchor on-chain")
+    last_day, on_chain_head = vec_of(stored)
+    ok = on_chain_head == head
+    print(f"head       {'matches' if ok else 'DIFFERS from'} the head on-chain (last day {last_day})")
+    if not ok:
+        sys.exit("FAIL" + ("" if b.get("later_days") or last_day == leaf["day"] else
+                           ": later_days is missing the anchors after this day"))
+    print(f"OK: {leaf['kg']} kg, lot {leaf['deposit_no']}, kind {leaf['kind']}, "
+          f"in {leaf['warehouse_id']}'s books on day {leaf['day']}")
+
+if __name__ == "__main__":
+    main()
+```
+
+What it checks, in order:
+
+1. **The proof fits the day:** exactly as many siblings as a tree of
+   `day_leaves` leaves is deep, and an index inside it.
+2. **The leaf hash and the root** it folds to.
+3. **Within 30 days of the leaf's day:** the root and leaf count stored
+   on-chain for that day (`getLedgerEntries` on the contract's temporary
+   `DayRoot(warehouse_id, day)` entry).
+4. **Always:** recomputes the head from that day forward through
+   `later_days`, and compares it with the head stored on-chain now (the
+   persistent `Head(warehouse_id)` entry). `prev_head` and `later_days` come
+   from `anchored` events, which can be taken from any archive, Farmledge's
+   included, or replayed from ledger history: they need not be trusted,
+   because wrong ones cannot reproduce the stored head.
+
+It was run against the Testnet deployment on 2026-10-05, on a fresh bundle
+and on one checked only through the head chain; see `docs/archival.md`.
 
 **What a valid proof shows:** this exact leaf (lot, owner, weight, grade,
 attesters) was in that warehouse's committed books for that day, and the
@@ -395,3 +605,7 @@ there. Those rest on audits and the warehouse.
 A balance proof older than the latest anchor says what the lot held *then*.
 To check current holdings, ask the farmer for their latest monthly
 statement, which carries a balance proof less than 30 days old.
+
+The contract's own reads give the same answers for a recent day:
+`leaf_hash(leaf)` and `verify_leaf(leaf, proof)` are free to simulate. They
+are a convenience too; the script does not use them.

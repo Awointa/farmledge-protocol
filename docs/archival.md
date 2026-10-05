@@ -6,21 +6,160 @@ are not deleted. Since protocol 23 they are restorable at any time. But until
 someone pays to restore one, a transaction that touches it pays for the
 restore, and an RPC read has to go through the restore path. This document
 covers the TTL policy, the keep-alive job the backend must run, the restore
-path, what each operation costs (measured on Testnet, converted to mainnet)
-before and after the `data_version` 2 changes, the renewal cadence, and the
-monthly and per-deposit cost.
+path, what each operation costs (measured on Testnet, converted to mainnet),
+the renewal cadence, and the monthly and per-deposit cost.
 
-**The cost assumption, stated plainly:** every figure in this document
-assumes that **every deposit mints its own receipt, and that receipt pays
-rent for 9–12 months**. Change that assumption (see the storage review
-below) and every per-deposit and monthly figure changes with it.
+**Since `data_version` 3 a deposit is not a receipt.** Each warehouse's
+books are anchored daily, and a receipt is minted only when a lot is
+pledged (`docs/storage-strategy.md`). The current figures are in
+[`data_version` 3: measured](#data_version-3-measured). The sections after
+it measure `data_version` 1 and 2, where **every deposit minted its own
+receipt that paid rent for 9–12 months**; they are kept as the record of
+how the design got here, and their per-deposit figures do not apply to v3.
 
-**The storage strategy is under review.** We are evaluating three changes:
-minting a receipt only when it is first pledged (about 30% of deposits),
-anchoring the inventory layer with a daily Merkle root instead of a receipt
-per deposit, and aggregating entries per farmer and commodity. Together they
-could cut rent by roughly 90%. **Treat the current per-deposit mint, and the
-costs that follow from it, as provisional, not settled.**
+## `data_version` 3: measured
+
+Deployment `CBW6TA5U…KIT4UAIN`, measured 2026-10-05 with
+`scripts/measure_costs.py` (every transaction submitted for real, fees read
+back from RPC), on the second run against the contract so that the farmer's
+and lender's index pages already exist, as they do in steady state. Raw
+numbers in `deployments/testnet.costs.json` and `testnet.entries.json`;
+the tables below are `scripts/cost_model.py`'s output.
+
+Testnet charged 5,238/KB during the run (snapshot 5147/KB, state 3.28 GB); mainnet 1000/KB on 2026-10-05 (state 1.90 GB). Rent formula check, 25-receipt extend: 4,105,147.0 predicted vs 4,105,198 charged.
+
+Each anchor is a 2,048-leaf day (a warehouse with about 2,000 active lots),
+so every mint carries an 11-level proof. All figures are XLM unless marked.
+
+| operation | Testnet | mainnet today | mainnet at 10,000/KB | of which rent (Testnet, stroops) |
+|---|---:|---:|---:|---:|
+| anchor — first day (creates the head), 2,048 leaves | 0.2263 | 0.0444 | 0.4307 | 2,248,507 |
+| anchor — next day, 2,048 leaves | 0.0206 | 0.0051 | 0.0380 | 191,523 |
+| mint_from_anchor — first in its claim chunk (creates chunk, owner index), depth 11 | 1.6110 | 0.3122 | 3.0703 | 16,052,577 |
+| mint_from_anchor — later lot, depth 11 | 0.5975 | 0.1187 | 1.1355 | 5,917,972 |
+| preclaim — 25 numbers, creates their chunk | 0.3243 | 0.0646 | 0.6161 | 3,209,477 |
+| preclaim — 25 numbers, chunk exists | 0.0033 | 0.0033 | 0.0033 | 0 |
+| lock — full | 0.1379 | 0.0282 | 0.2611 | 1,355,567 |
+| lock — partial (splits) | 0.7416 | 0.1452 | 1.4117 | 7,371,102 |
+| exit — full | 0.0220 | 0.0056 | 0.0404 | 203,089 |
+| exit — partial (splits) | 0.6257 | 0.1226 | 1.1911 | 6,218,621 |
+| extend_ttl_batch — 2 Exited receipts (skipped) | 0.0005 | 0.0005 | 0.0005 | 0 |
+| extend_due | 0.0009 | 0.0009 | 0.0009 | 0 |
+| unlock — partial (splits) | 0.6204 | 0.1215 | 1.1809 | 6,165,843 |
+| extend_ttl — 1 receipt, TTL above threshold (no-op bump) | 0.0006 | 0.0006 | 0.0006 | 0 |
+| extend_ttl_batch — 25 receipts, TTL above threshold | 0.0053 | 0.0053 | 0.0053 | 0 |
+| extend_index_ttl — 2 pages | 0.0005 | 0.0005 | 0.0005 | 0 |
+| native extend — 1 receipt, +1 day (to 176 days) | 0.0037 | 0.0009 | 0.0069 | 34,934 |
+| native extend — 1 receipt, +5 days (to 180-day ceiling) | 0.0167 | 0.0034 | 0.0316 | 164,430 |
+| native extend — 25 receipts, to 180-day ceiling | 0.4116 | 0.0795 | 0.7849 | 4,105,198 |
+| start_recovery | 0.1915 | 0.0373 | 0.3648 | 1,906,271 |
+| complete_recovery | 0.5514 | 0.1086 | 1.0490 | 5,473,327 |
+| record_settlement | 0.0274 | 0.0069 | 0.0505 | 253,490 |
+| unlock — full | 0.0009 | 0.0009 | 0.0009 | 0 |
+
+What stands out:
+
+- **A mint costs 0.119 XLM on mainnet today, 18% less than v2's** (0.145),
+  although it now checks an 11-level Merkle proof: the per-deposit guard
+  is gone, and the proof check costs CPU, not rent (3.4M instructions in
+  all, against 2.4M for v2's mint).
+- **A day's anchor costs 0.005 XLM on mainnet today** (0.04 at 10,000/KB):
+  the head is rewritten in place, and the root sits in temporary storage
+  for 30 days at half the persistent rate.
+- **Everything after the mint costs what it did in v2.** Lock, unlock,
+  exit, recovery and settlement are the same code over a receipt 16 bytes
+  larger (`deposit_no`).
+- **A pre-claim of 25 numbers costs 0.0033 XLM** when their claim chunk
+  exists, and 0.065 when it creates the chunk.
+
+Stored entry sizes, read back with `getLedgerEntries`:
+
+| entry | bytes |
+|---|---:|
+| Head | 164 |
+| DayRoot (temporary) | 176 |
+| Receipt — Active, freshly minted | 448 |
+| Claimed chunk (1,024 deposit numbers) | 256 |
+| Receipt — Locked | 544 |
+| Receipt — Active, reduced in place by a split | 448 |
+| OwnerIndex page 0 | 800 |
+| Receipt — after a completed recovery | 668 |
+| Sale — settled | 420 |
+
+The receipt grew from 432 to 448 bytes for `deposit_no`; the 124-byte
+`DepositIndex` per deposit is gone, replaced by 256 bytes per 1,024
+deposit numbers.
+
+### Per deposit and per month
+
+**Assumptions,** the same as in `docs/storage-strategy.md`: a lot is in
+store for 270 days; 30% of lots are pledged, on day 30, for 90 days, and
+only those are minted; the receipt is kept alive from the mint to the exit
+under the decided keep-alive policy; about 50 deposits per warehouse per
+month, so each warehouse's daily anchors are shared by about 600 deposits
+a year. Recoveries are rare and left out.
+
+| | Testnet | mainnet today | mainnet at 10,000/KB |
+|---|---:|---:|---:|
+| anchors, per warehouse per year | 7.9481 | 1.9398 | 14.6994 |
+| a pledged deposit (mint, lock, unlock, exit, keep-alive) | 1.2346 | 0.2447 | 2.3469 |
+| an unpledged deposit (its share of anchors and of a claim chunk) | 0.0136 | 0.0033 | 0.0251 |
+| **per deposit, 30% pledged** | 0.3839 | 0.0767 | 0.7292 |
+
+| rate | XLM per deposit | 200 deposits / month | 2,000 deposits / month |
+|---|---:|---:|---:|
+| Testnet | 0.3839 | 76.8 | 768 |
+| mainnet today | 0.0767 | 15.3 | 153 |
+| mainnet at 10,000/KB | 0.7292 | 145.8 | 1,458 |
+
+Against `data_version` 2 (every deposit minted and kept alive, 0.2734 XLM
+per deposit on mainnet today, 2.6669 at 10,000/KB, 1.4343 on Testnet) that
+is **72–73% less** at every rate: at 2,000 deposits a month, 547 → 153 XLM
+a month today and 5,334 → 1,458 at 10,000/KB. The prototype's estimate for
+A+B was 0.0751 and 0.7194; the built contract comes within about 2%.
+
+**What moves the figure:** almost all of it is the pledged share. Each
+point of pledge rate adds about 0.0024 XLM per deposit today (0.023 at
+10,000/KB). Anchors are per warehouse: 1.94 XLM per warehouse per year on
+mainnet today, 14.70 at 10,000/KB, so a warehouse with fewer deposits than
+50 a month pays more per deposit for them, and an idle warehouse need not
+be anchored at all.
+
+| creating one claim chunk | 0.3209 | 0.0613 | 0.6127 |
+
+| pre-claim, one call | Testnet | mainnet today | mainnet at 10,000/KB |
+|---|---:|---:|---:|
+| preclaim — 25 numbers, creates their chunk | 0.3243 | 0.0646 | 0.6161 |
+| preclaim — 25 numbers, chunk exists | 0.0033 | 0.0033 | 0.0033 |
+
+
+The raw run, with the resources each transaction declared:
+
+| operation | fee charged (stroops) | XLM | of which rent | other resource fee | CPU instructions | disk read B | write B | footprint RO / RW | events B | tx |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| anchor — first day (creates the head), 2,048 leaves | 2,262,770 | 0.2263 | 2,248,507 | 14,163 | 1,119,951 | 0 | 340 | 4 / 2 | 408 | `7a075d921734` |
+| anchor — next day, 2,048 leaves | 205,800 | 0.0206 | 191,523 | 14,177 | 1,139,694 | 0 | 340 | 4 / 2 | 408 | `f4802e95c4c0` |
+| mint_from_anchor — first in its claim chunk (creates chunk, owner index), depth 11 | 16,109,509 | 1.6110 | 16,052,577 | 56,832 | 3,254,638 | 144 | 1,628 | 7 / 8 | 884 | `30769ce02eb7` |
+| mint_from_anchor — later lot, depth 11 | 5,975,076 | 0.5975 | 5,917,972 | 57,004 | 3,398,673 | 144 | 1,712 | 7 / 8 | 884 | `8fb2640ac532` |
+| preclaim — 25 numbers, creates their chunk | 3,242,920 | 0.3243 | 3,209,477 | 33,343 | 4,072,760 | 0 | 256 | 3 / 1 | 4,300 | `f1ac3ba4a741` |
+| preclaim — 25 numbers, chunk exists | 33,459 | 0.0033 | 0 | 33,359 | 4,095,453 | 0 | 256 | 3 / 1 | 4,300 | `0240b5869e73` |
+| lock — full | 1,378,733 | 0.1379 | 1,355,567 | 23,066 | 1,782,114 | 144 | 960 | 3 / 4 | 388 | `4e605662e295` |
+| lock — partial (splits) | 7,416,093 | 0.7416 | 7,371,102 | 44,891 | 2,778,722 | 144 | 2,432 | 2 / 10 | 896 | `e35caec2c0b5` |
+| exit — full | 219,818 | 0.0220 | 203,089 | 16,629 | 1,553,515 | 144 | 540 | 4 / 2 | 368 | `64a5b0cb7a3b` |
+| exit — partial (splits) | 6,257,179 | 0.6257 | 6,218,621 | 38,458 | 2,541,646 | 144 | 2,024 | 3 / 8 | 876 | `b087a442fc74` |
+| extend_ttl_batch — 2 Exited receipts (skipped) | 4,708 | 0.0005 | 0 | 4,608 | 963,321 | 0 | 0 | 5 / 0 | 0 | `6460429bb636` |
+| extend_due | 9,364 | 0.0009 | 0 | 9,264 | 960,696 | 0 | 552 | 2 / 1 | 428 | `a733ccb72cde` |
+| unlock — partial (splits) | 6,203,931 | 0.6204 | 6,165,843 | 37,988 | 2,238,098 | 0 | 2,424 | 1 / 9 | 992 | `025336be9555` |
+| extend_ttl — 1 receipt, TTL above threshold (no-op bump) | 5,577 | 0.0006 | 0 | 5,477 | 921,553 | 0 | 0 | 4 / 0 | 288 | `a6ebd3ceef00` |
+| extend_ttl_batch — 25 receipts, TTL above threshold | 52,720 | 0.0053 | 0 | 52,620 | 5,575,487 | 0 | 0 | 28 / 0 | 7,200 | `42884b2118e6` |
+| extend_index_ttl — 2 pages | 5,445 | 0.0005 | 0 | 5,345 | 893,760 | 0 | 0 | 5 / 0 | 0 | `0979af73a22b` |
+| native extend — 1 receipt, +1 day (to 176 days) | 37,428 | 0.0037 | 34,934 | 2,394 | 0 | 0 | 0 | 1 / 0 | 0 | `f8d741f1877f` |
+| native extend — 1 receipt, +5 days (to 180-day ceiling) | 166,924 | 0.0167 | 164,430 | 2,394 | 0 | 0 | 0 | 1 / 0 | 0 | `08e6e74520cc` |
+| native extend — 25 receipts, to 180-day ceiling | 4,116,482 | 0.4116 | 4,105,198 | 11,184 | 0 | 0 | 0 | 25 / 0 | 0 | `e1b6f6471751` |
+| start_recovery | 1,915,436 | 0.1915 | 1,906,271 | 9,065 | 962,422 | 0 | 696 | 2 / 1 | 376 | `1306d88d5760` |
+| complete_recovery | 5,514,099 | 0.5514 | 5,473,327 | 40,672 | 2,588,553 | 144 | 2,172 | 3 / 9 | 560 | `51da3a0cd670` |
+| record_settlement | 274,142 | 0.0274 | 253,490 | 20,552 | 1,648,559 | 144 | 600 | 4 / 3 | 572 | `e4a1c5978ce4` |
+| unlock — full | 9,068 | 0.0009 | 0 | 8,968 | 955,083 | 0 | 456 | 2 / 1 | 384 | `5e56b8bf9f19` |
 
 ## The TTL policy
 
@@ -48,15 +187,18 @@ transaction's base resource fee (measured below).
 | entry | refreshed by |
 |---|---|
 | `Receipt(id)` | every write to that receipt (lock, unlock, exit, split, extend_due, recovery), and `extend_ttl` / `extend_ttl_batch` **unless it is `Exited` or `Revoked`**. Those are left to archive. |
-| `DepositIndex(deposit_id)`: the duplicate-mint guard | mint, and `extend_ttl` / `extend_ttl_batch` on any live receipt of that deposit. Once every receipt of a deposit has finished, the guard archives too. It still blocks a duplicate mint, because the mint reads it and that restores it (`ttl::an_archived_deposit_guard_still_blocks_a_duplicate_mint`). |
+| `Claimed(warehouse_id, chunk)`: the duplicate guard, one bit per deposit number, 1,024 per entry | written by a mint or pre-claim that sets a bit in it, and nothing else. It is **never kept alive**: once archived it still blocks a duplicate mint, because the mint reads it and that restores it (`ttl::an_archived_claim_chunk_still_blocks_a_duplicate_mint`). It must never be temporary storage (audit finding A3, pinned by `audit::a3_the_claim_bitmap_is_persistent_storage`). |
+| `Head(warehouse_id)`: the anchor chain's head | every `anchor` of that warehouse, daily. If anchoring stops for 175 days it archives, and the next anchor or read restores it. |
+| `DayRoot(warehouse_id, day)`: a day's root and leaf count | **temporary storage, 30 days, then deleted** by the network, by design. Minting only ever uses the latest day; older days are proved through the head and the `anchored` events (`docs/events.md`). |
 | `Sale(id)` | complete_recovery, record_settlement, and `extend_ttl(_batch)` on any live receipt whose history names it. If every such receipt has finished before the bank settles, `record_settlement` restores the sale, at the caller's cost. |
 | `UnsettledSales` | complete_recovery, record_settlement, every `extend_ttl(_batch)` |
 | owner / warehouse / lender / lender-sale **index pages** and their page counters | appending to the page while it is filling. **A full page (64 ids) is never written again.** It is kept alive only by `extend_index_ttl`. |
 | registry entries (warehouse, custodian, verifier, operator) | being added, and every time they are checked (mint, exit, complete_recovery, record_settlement). An idle warehouse's registration can archive. That is harmless: the next mint restores it automatically. |
 | contract instance + code | every state-changing call and every keep-alive call |
 
-There is no temporary storage, so nothing in this contract can ever be lost
-permanently through expiry.
+`DayRoot` is the only temporary entry. Its expiry loses nothing that is not
+also in the `anchored` events and committed to by the head; everything else
+is persistent and can never be lost through expiry.
 
 ## The keep-alive job (backend)
 
@@ -100,12 +242,16 @@ has been failing for two weeks.
    `{"LenderSales": "G…"}`.
 5. Every call also refreshes the contract instance and `UnsettledSales`, so
    there is nothing separate to do for those.
+6. **Nothing for the anchors or the claim bitmap.** Each warehouse's `Head`
+   is rewritten by its daily anchor; `DayRoot` entries are temporary by
+   design; `Claimed` chunks are left to archive and restored by the mint
+   that reads them.
 
 Why 25: it is the largest batch that stays well inside Testnet's
 per-transaction limits even when every receipt in it carries several sale
 records, and it was submitted at that size on Testnet (cost table below).
 The binding limits are `tx_max_footprint_entries` = 400 (each receipt
-needs 2 entries plus 1 per sale in its history) and
+needs 1 entry plus 1 per sale in its history) and
 `tx_max_contract_events_size_bytes` = 16,384 (one `ttl_extended` event per
 receipt).
 
@@ -150,8 +296,8 @@ something no call reaches cheaply, such as an index page.
    ```bash
    # a receipt
    K=$(echo '{"vec":[{"symbol":"Receipt"},{"u64":"42"}]}' | stellar xdr encode --type ScVal)
-   # its duplicate-mint guard
-   K=$(echo '{"vec":[{"symbol":"DepositIndex"},{"string":"DEP-2026-0042"}]}' | stellar xdr encode --type ScVal)
+   # the claim chunk holding deposit number 1,500 of a warehouse (1500 / 1024 = 1)
+   K=$(echo '{"vec":[{"symbol":"Claimed"},{"symbol":"WH_KANO_01"},{"u64":"1"}]}' | stellar xdr encode --type ScVal)
    # a sale
    K=$(echo '{"vec":[{"symbol":"Sale"},{"u64":"7"}]}' | stellar xdr encode --type ScVal)
    # page 0 of a farmer's index (likewise WarehouseIndex/Symbol, LenderIndex, LenderSaleIndex)
@@ -249,8 +395,8 @@ submits every transaction for real and reads back what the network charged:
   `deployments/testnet.v1.costs.json` and `testnet.v1.entries.json`.
 - **After:** `CDLSGBNI…LZJW3` (now retired), `data_version` 2 (compact storage, splits in
   place, finished receipts skipped by the keep-alive), measured 2026-10-04.
-  Raw numbers in `deployments/testnet.costs.json` and
-  `testnet.entries.json`. The current deployment, `CB3PY2P5…NXKYFPEM`, is
+  Raw numbers in `deployments/testnet.v2.costs.json` and
+  `testnet.v2.entries.json`. The next deployment, `CB3PY2P5…NXKYFPEM` (also retired), was
   the same build plus a 64-byte cap on `deposit_id`, a single length check
   that does not change these costs measurably, so it was not re-measured.
 

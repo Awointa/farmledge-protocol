@@ -3,10 +3,11 @@
 **Decision: the receipt contract is immutable.** It has no entry point that
 replaces its Wasm. A change ships as a new deployment, and receipts move to
 it through the drain-and-re-mint migration described below. Every stored
-`Receipt` and `Sale` carries a `data_version` (currently `2`, readable with
+`Receipt` and `Sale` carries a `data_version` (currently `3`, readable with
 `data_version()`), so any future tool or contract can tell which layout a
 record was written in. Version 1 stored named-field maps; version 2 stores
-the positional layout in `src/layout.rs`.
+the positional layout in `src/layout.rs`; version 3 adds `deposit_no` to it
+and mints receipts on demand from anchored books.
 
 ## Why not admin-upgradeable
 
@@ -54,7 +55,18 @@ and every reset is a redeploy (see the README).
 
 ## Migration path: drain and re-mint
 
-When a v2 contract is needed:
+**Not for the switch to `data_version` 3.** From v3 on, a receipt is minted
+only from a lot's anchored balance leaf, and a lot held as a receipt on the
+previous contract at cutover is **pre-claimed** on v3, so it can never be
+minted there. Such a lot stays on the previous contract for its whole life,
+new pledges included, and that contract drains as its lots exit. Re-minting
+it on v3 would put the same grain on two contracts, which is the
+double-financing hole pre-claiming exists to close (audit finding A19). The
+v2 → v3 cutover, for Testnet and mainnet, is in `docs/storage-strategy.md`
+("Migration path").
+
+The path below is the one for two contracts that both mint per deposit, as
+v1 and v2 did. When such a v2 contract is needed:
 
 1. **Deploy v2** with `make deploy-testnet` (or the Mainnet equivalent) and
    register the warehouses, custodians, verifiers and recovery operators on

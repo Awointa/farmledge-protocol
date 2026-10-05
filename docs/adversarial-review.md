@@ -39,9 +39,12 @@ outside this repo.
 | F24 | Someone claims the contract between deploy and `initialize` and registers their own custodians | **fixed:** a constructor installs the admin in the deploy transaction | **NEW** `registry::the_constructor_installs_the_admin_in_the_deploy_itself` |
 | F25 | The Wasm is replaced to rewrite ownership | contract is immutable | `make check-immutable` (CI) |
 | F26 | A rejected call leaves partial state behind | all-or-nothing calls | `prop_lifecycle` (no side effects on rejection) |
-| F27 | A finished receipt archives, its deposit guard with it, and the same intake is minted again | the archived guard is restored when the duplicate mint reads it, and the mint is refused | **NEW** `ttl::an_archived_deposit_guard_still_blocks_a_duplicate_mint` |
+| F27 | A finished receipt archives, its claim chunk with it, and the same lot is minted again | the archived chunk is restored when the duplicate mint reads it, and the mint is refused | `ttl::an_archived_claim_chunk_still_blocks_a_duplicate_mint` (`data_version` 3; was the `DepositIndex` guard's test) |
 | F28 | A stored record is misread as a different status or weight source | unknown stored codes abort with `CorruptRecord` | **NEW** `layout::an_unknown_stored_code_is_a_corrupt_record`, `layout::the_layout_is_lossless` |
-| F29 | An over-long `deposit_id` (custodian keys are held by the backend in Phase 1) inflates the rent of the receipt, every receipt split off it and its deposit guard | `deposit_id` capped at `MAX_REF_LEN` (64 bytes) | **NEW** `adversarial::a_deposit_id_longer_than_the_cap_is_rejected_and_mints_nothing` |
+| F29 | An over-long `deposit_id` (custodian keys are held by the backend in Phase 1) inflates the rent of the receipt and every receipt split off it | `deposit_id` capped at `MAX_REF_LEN` (64 bytes), now checked on the leaf | `adversarial::a_deposit_id_longer_than_the_cap_is_rejected_and_mints_nothing` |
+| F30 | A farmer's lot is minted under someone else's name, or with a lower weight or grade than the books record | every receipt field is copied from the proven leaf; the proof binds every field | **NEW** `audit::a8_every_receipt_field_comes_from_the_proven_leaf`, **NEW** `audit::a8_a_leaf_altered_after_anchoring_cannot_mint` |
+| F31 | A lot's anchored record is rewritten after the fact, so the farmer's proof no longer checks | days are strictly ordered and a day is never re-anchored; the head chains every day | **NEW** `audit::a12_an_anchored_day_cannot_be_replaced`, **NEW** `audit::a16_the_head_chains_every_anchored_day`, **NEW** `prop_focused::anchors_are_strictly_ordered_and_never_ahead_of_the_ledger` |
+| F32 | A future day is anchored, so no real day can be and nothing can mint | `day ≤ ledger day`; "never anchored" is not day 0 | **NEW** `audit::a11_a_day_after_the_ledger_day_cannot_be_anchored`, **NEW** `audit::a11_day_zero_is_not_a_never_anchored_sentinel` |
 
 ## b. A lender loses collateral it is rightfully owed
 
@@ -71,6 +74,11 @@ outside this repo.
 | L22 | The indexer loses track of collateral across a split of a pledged receipt | `split` now carries `lender` | `unlock::unlocked_event_marks_a_partial_release` (updated) |
 | L23 | Deploy-time hijack, or a Wasm upgrade | as F24, F25 | as F24, F25 |
 | L24 | A lender (lenders are not registered) passes a huge `loan_ref`, inflating the rent of every entry that copies it, which the keep-alive job pays | `loan_ref`, `sale_ref` and `settlement_ref` capped at `MAX_REF_LEN` (64 bytes) | **NEW** `adversarial::refs_longer_than_the_cap_are_rejected_and_change_nothing` |
+| L25 | **The same lot is minted twice and pledged to two lenders** (audit finding A1: in Phase 1 Farmledge holds both minting keys, so this was a Farmledge-side double-financing hole) | one claim bit per `(warehouse_id, deposit_no)`, read from the proven leaf, never from a leaf position, day or root | **NEW** `audit::a1_one_lot_cannot_be_minted_twice_through_leaves_from_two_days`, **NEW** `audit::a1_one_lot_cannot_be_minted_twice_from_two_leaves_of_one_day`, **NEW** `prop_focused::one_lot_never_becomes_two_receipts`, `prop_lifecycle` (invariant 5) |
+| L26 | A receipt is minted for more than the lot holds, from its old deposit leaf or a balance from before a dispatch | only a balance leaf from the latest anchored day mints (A5, A6). Dispatches after that day's cutoff are invisible to the contract: see T9 | **NEW** `audit::a5_a_deposit_or_dispatch_leaf_cannot_mint`, **NEW** `audit::a6_a_balance_leaf_from_an_earlier_day_cannot_mint` |
+| L27 | A lot held as a receipt on the previous contract is minted again on v3 and pledged on both (A19) | `preclaim` claims its number, permanently; a leaf naming a receipt cannot mint | **NEW** `audit::a19_a_preclaimed_lot_can_never_be_minted`, **NEW** `audit::a19_preclaim_is_admin_only_and_rejects_a_number_already_claimed`, **NEW** `audit::a19_a_leaf_naming_a_receipt_cannot_mint` |
+| L28 | A forged proof: a padding leaf, an inner node, or a proof stopped short or run long | leaf/node domain separation; proof length must equal the day's depth and the index lie inside the day | **NEW** `audit::a10_a_proof_of_the_wrong_length_or_position_is_rejected`, **NEW** `audit::a10_a_leaf_indexed_outside_its_day_is_rejected_even_when_the_proof_folds`, **NEW** `audit::a10_an_inner_node_cannot_pass_as_a_leaf` |
+| L29 | The claim bitmap expires and reopens every number in a chunk | persistent storage, never temporary | **NEW** `audit::a3_the_claim_bitmap_is_persistent_storage`, `ttl::an_archived_claim_chunk_still_blocks_a_duplicate_mint` |
 
 ## Losses the contract cannot prevent
 
@@ -86,6 +94,10 @@ These need an owner outside this repo.
 | T6 | Farmledge holds farmer, custodian and buyer keys, so co-signatures are procedural rather than cryptographic. | SDD §6 upgrade path: separate key material, then self-custody before real lending. |
 | T7 | A custodian and verifier collude to mint a receipt for grain that does not exist. | Physical controls (SDD §1.1). On discovery, the lender unlocks and the admin revokes. |
 | T8 | An archived entry costs a restore before it can be used. Persistent data is never deleted, so this is a cost, not a loss. | Keep-alive job (docs/archival.md). |
+| T9 | **A lot dispatched after the latest anchor's cutoff is minted at its anchored balance.** The contract only sees anchored days. | The backend's freeze, and the reconciliation check that flags any mint whose leaf was not the latest (`docs/storage-strategy.md`, "The freshness invariant"). Backend-enforced, stated as such. |
+| T10 | The anchored books are incomplete or false, or one physical lot is given two deposit numbers (A2). The chain proves what was committed, not that it was true. | Audits of each day's full leaf set against physical counts; the per-warehouse number sequence must be contiguous with one deposit leaf per number (`docs/backend-requirements.md` §3). |
+| T11 | The pre-claim list at cutover is wrong: a missing lot is mintable twice; a wrongly included one can never be pledged on v3. | The cutover procedure: list built from the chain, old-contract mints stopped on-chain first, diff, publication, review, verification (`docs/storage-strategy.md`, "Pre-claiming at cutover"). |
+| T12 | An unpledged lot exists only in Farmledge's database and the farmer's proofs. If Farmledge withholds proofs, the farmer cannot prove it. | Proof delivery is a correctness requirement (`docs/backend-requirements.md` §4), with a standalone verifier that needs no Farmledge service. |
 
 ## Test quality: which tests would pass with their rule removed
 
@@ -120,22 +132,39 @@ found these survivors:
 | `exit`: `kg == 0 \|\| kg > weight` mutated to `&&` | equivalent, as above | none |
 | `data_version()` replaced with `1` | equivalent while `DATA_VERSION` is 1. `reads` asserts it equals the constant, which is what a future bump needs. | none |
 
-Every `require_auth()` deletion is caught by at least one targeted test. See
-the table below, generated by deleting each call.
+A third run, on the `data_version` 3 code (2026-10-05), over the new and
+changed modules `anchor.rs` and `storage.rs`: **174 mutants, 139 caught, 29
+unviable, 1 timeout, 5 missed.** The timeout (`next_receipt_id` returning 1)
+counts as caught: overwriting receipt 1 forever makes the suite hang. The
+five survivors:
+
+| Rule | What would still pass if it were removed | Fix |
+|---|---|---|
+| a leaf's `index` must lie inside its day (`\|\|` → `&&` in `proves`) | every test: none had a leaf whose index is outside the day but whose proof still folds | **NEW** `audit::a10_a_leaf_indexed_outside_its_day_is_rejected_even_when_the_proof_folds`; the mutant now fails it |
+| a leaf naming a receipt cannot mint (`receipt_id != 0 \|\| receipt_version != 0` → `&&`) | `audit::a19_a_leaf_naming_a_receipt_cannot_mint` set both fields at once | the test now sets each alone too; the mutant fails it |
+| a day root lives 30 days (`30 * DAY` → `30 + DAY`) | the tests compared with the constant, which mutated with it | `audit::a14_a15_…` pins 518,400 ledgers and checks the root is still there on day 29 |
+| a claim chunk is 128 bytes (`/ 8` → `* 8`: 8 KB chunks, still correct, 64× the rent) | everything: behaviour is unchanged | `audit::a3_…` asserts the chunk's length |
+| setting the bit uses `\|` (→ `^`) | equivalent: the line runs only when the bit is clear, where OR and XOR agree | none. Documented so nobody "fixes" it |
+
+Every `require_auth()` deletion is caught by at least one targeted test. The
+table below was regenerated on the `data_version` 3 code (2026-10-05) by
+deleting each call in turn and running the suite.
 
 | deleted call | tests that fail |
 |---|---|
-| `lending.rs:59` `lock.lender.require_auth();` | `adversarial::a_lender_signature_to_release_one_receipt_cannot_release_another`, `recovery::complete_recovery_with_only_the_operator_fails`, `recovery::start_recovery_by_the_owner_or_another_lender_fails`, `recovery::unlock_during_recovery_by_the_owner_fails`, `unlock::extend_due_by_the_owner_or_another_lender_fails`, `unlock::unlock_by_the_owner_fails`, `unlock::unlock_by_a_different_lender_fails` |
-| `lending.rs:86` `lender.require_auth();` | `lock::lock_fails_with_only_the_owners_signature` |
-| `lending.rs:87` `receipt.owner.require_auth();` | `adversarial::an_owner_signature_for_a_small_pledge_cannot_pledge_more`, `adversarial::the_previous_owner_cannot_exit_or_pledge_sold_grain`, `lock::lock_fails_with_only_the_lenders_signature` |
-| `lending.rs:274` `operator.require_auth();` | `recovery::complete_recovery_with_only_the_lender_fails` |
-| `lending.rs:350` `operator.require_auth();` | `settlement::record_settlement_with_only_the_lender_fails` |
-| `lending.rs:351` `sale.lender.require_auth();` | `settlement::a_receipt_sold_twice_has_two_independently_settled_sales`, `settlement::record_settlement_with_only_the_operator_fails`, `settlement::record_settlement_with_the_operator_and_a_different_lender_fails` |
-| `admin.rs:30` `admin.require_auth();` | `registry::a_non_admin_cannot_touch_any_registry`, `registry::the_constructor_installs_the_admin_in_the_deploy_itself`, `revoke::revoke_is_admin_only` |
-| `lib.rs:97` `custodian.require_auth();` | `mint::mint_fails_with_only_the_verifier_signature` |
-| `lib.rs:98` `verifier.require_auth();` | `mint::mint_fails_with_only_the_custodian_signature` |
-| `lib.rs:199` `custodian.require_auth();` | `exit::exit_fails_with_only_the_owner_signature` |
-| `lib.rs:200` `receipt.owner.require_auth();` | `exit::exit_fails_with_only_the_custodian_signature`, `adversarial::the_previous_owner_cannot_exit_or_pledge_sold_grain`, `recovery::the_buyer_can_exit_after_a_completed_recovery` |
+| `admin.rs:30` `admin.require_auth();` | `audit::a19_preclaim_is_admin_only_and_rejects_a_number_already_claimed`, `registry::a_non_admin_cannot_touch_any_registry`, `registry::the_constructor_installs_the_admin_in_the_deploy_itself`, `revoke::revoke_is_admin_only` |
+| `lib.rs:155` `custodian.require_auth();` | `exit::exit_fails_with_only_the_owner_signature` |
+| `lib.rs:156` `receipt.owner.require_auth();` | `adversarial::the_previous_owner_cannot_exit_or_pledge_sold_grain`, `exit::exit_fails_with_only_the_custodian_signature`, `recovery::the_buyer_can_exit_after_a_completed_recovery` |
+| `lending.rs:78` `lock.lender.require_auth();` | `adversarial::a_lender_signature_to_release_one_receipt_cannot_release_another`, `recovery::complete_recovery_with_only_the_operator_fails`, `recovery::start_recovery_by_the_owner_or_another_lender_fails`, `recovery::unlock_during_recovery_by_the_owner_fails`, `unlock::extend_due_by_the_owner_or_another_lender_fails`, `unlock::unlock_by_a_different_lender_fails`, `unlock::unlock_by_the_owner_fails` |
+| `lending.rs:105` `lender.require_auth();` | `lock::lock_fails_with_only_the_owners_signature` |
+| `lending.rs:106` `receipt.owner.require_auth();` | `adversarial::an_owner_signature_for_a_small_pledge_cannot_pledge_more`, `adversarial::the_previous_owner_cannot_exit_or_pledge_sold_grain`, `lock::lock_fails_with_only_the_lenders_signature` |
+| `lending.rs:294` `operator.require_auth();` | `recovery::complete_recovery_with_only_the_lender_fails` |
+| `lending.rs:371` `operator.require_auth();` | `settlement::record_settlement_with_only_the_lender_fails` |
+| `lending.rs:372` `sale.lender.require_auth();` | `settlement::a_receipt_sold_twice_has_two_independently_settled_sales`, `settlement::record_settlement_with_only_the_operator_fails`, `settlement::record_settlement_with_the_operator_and_a_different_lender_fails` |
+| `anchor.rs:115` `custodian.require_auth();` (`anchor`) | `audit::a13_only_a_custodian_of_the_warehouse_can_anchor_it` |
+| `anchor.rs:172` `custodian.require_auth();` (`mint_from_anchor`) | `mint::mint_fails_with_only_the_verifier_signature` |
+| `anchor.rs:173` `verifier.require_auth();` (`mint_from_anchor`) | `mint::mint_fails_with_only_the_custodian_signature` |
+| `anchor.rs:294` `admin::require_admin(env)?;` (`preclaim`) | `audit::a19_preclaim_is_admin_only_and_rejects_a_number_already_claimed` |
 
 The `.is_err()`-only negative auth tests were reviewed. Each is paired with
 a positive control in the same test or file (for example
