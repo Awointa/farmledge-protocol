@@ -1,10 +1,5 @@
 //! Daily anchoring and minting on demand (`data_version` 3).
 //!
-//! **STAGE 1 OF 2: this file deliberately reproduces the checks of the
-//! storage-strategy prototype (`prototypes/storage`), flaws included**, so
-//! the audit's regression tests (`test/audit.rs`) can be seen failing
-//! against them. The next commit replaces each flawed check with its fix.
-//!
 //! Each warehouse commits its books once a day: a Merkle root over that
 //! day's deposit, dispatch and end-of-day balance leaves, chained into a
 //! head. A receipt is minted only when a lot needs one (to be pledged), from
@@ -124,13 +119,21 @@ pub fn anchor(
 
     // A11, A12: strictly after the last anchored day — "never anchored" is
     // the head's absence, not day 0 — and never after today.
-    // PROTOTYPE (A11): day 0 doubles as "never anchored", no upper bound.
-    let prev = storage::get_head(env, &warehouse_id)
-        .unwrap_or(StoredHead(0, BytesN::from_array(env, &[0u8; 32])));
-    if prev.0 >= day && prev.0 != 0 {
-        return Err(Error::AnchorOutOfOrder);
+    let prev = storage::get_head(env, &warehouse_id);
+    if let Some(p) = &prev {
+        if day <= p.0 {
+            return Err(Error::AnchorOutOfOrder);
+        }
     }
-    let prev_head = prev.1;
+    if day > ledger_day(env) {
+        return Err(Error::AnchorInFuture);
+    }
+
+    // A14, A16: the head is persistent and commits to every day before it.
+    let prev_head = match prev {
+        Some(p) => p.1,
+        None => BytesN::from_array(env, &[0u8; 32]),
+    };
     let head = chain(env, &prev_head, day, leaves, &root);
     storage::set_head(env, &warehouse_id, &StoredHead(day, head.clone()));
     // A15: the root itself only needs to be on-chain while mints use it.
@@ -179,15 +182,22 @@ pub fn mint_from_anchor(
     }
     // A5: a deposit or dispatch leaf records a movement, not what the lot
     // holds now.
-    // PROTOTYPE (A5): any kind of leaf mints.
+    if leaf.kind != KIND_BALANCE {
+        return Err(Error::WrongLeafKind);
+    }
     // A lot the books already show as governed by a receipt, here or on an
     // earlier contract, is not minted again. Defence in depth only: the
     // guard below does not rely on the backend filling this in (A19).
-    // PROTOTYPE (A19): nothing knows about lots held elsewhere.
+    if leaf.receipt_id != 0 || leaf.receipt_version != 0 {
+        return Err(Error::LeafHasReceipt);
+    }
     // A6: only the latest anchored day's balance is current. The contract
     // cannot see dispatches made since that anchor; the backend freezes a
     // lot's dispatches while its mint is pending (docs/storage-strategy.md).
-    // PROTOTYPE (A6): any day whose root is still stored.
+    let head = storage::get_head(env, &warehouse_id).ok_or(Error::NoAnchor)?;
+    if leaf.day != head.0 {
+        return Err(Error::StaleLeaf);
+    }
     let day = storage::get_day_root(env, &warehouse_id, leaf.day).ok_or(Error::NoAnchor)?;
 
     if leaf.kg == 0 {
@@ -212,9 +222,7 @@ pub fn mint_from_anchor(
 
     // A1, A3, A4, A7: one bit per lot, keyed on the proven leaf's stable
     // identity — the same bit through every day's leaf, index and root.
-    // PROTOTYPE (A1): keyed on the leaf's position, as D's guard was.
-    let position = ((leaf.day as u64) << 32) | leaf.index as u64;
-    if !storage::claim(env, &warehouse_id, position) {
+    if !storage::claim(env, &warehouse_id, leaf.deposit_no) {
         return Err(Error::DuplicateDepositId);
     }
 
@@ -234,15 +242,14 @@ pub fn mint_from_anchor(
         bag_count: leaf.bags,
         moisture_pct: leaf.moisture_bps,
         warehouse_id: warehouse_id.clone(),
-        // PROTOTYPE (A8): the mint's signers and time, not the leaf's.
-        custodian: custodian.clone(),
-        verifier: verifier.clone(),
+        custodian: leaf.custodian.clone(),
+        verifier: leaf.verifier.clone(),
         owner: leaf.owner.clone(),
         status: Status::Active,
         lock: MaybeLock::None,
         recovery: MaybeRecovery::None,
         recovery_history: Vec::new(env),
-        deposit_date: env.ledger().timestamp(),
+        deposit_date: leaf.deposited_at,
         exit_date: None,
         exit_weight_kg: None,
     };
@@ -285,7 +292,20 @@ pub fn preclaim(env: &Env, warehouse_id: Symbol, deposit_nos: Vec<u64>) -> Resul
     if !admin::is_warehouse(env, &warehouse_id) {
         return Err(Error::WarehouseNotRegistered);
     }
-    // PROTOTYPE (A19): the prototype had no pre-claim; this claims nothing.
+    let now = env.ledger().timestamp();
+    for deposit_no in deposit_nos.iter() {
+        // All-or-nothing: one number already claimed fails the whole call,
+        // because it means the list is wrong.
+        if !storage::claim(env, &warehouse_id, deposit_no) {
+            return Err(Error::DuplicateDepositId);
+        }
+        events::Preclaimed {
+            warehouse_id: warehouse_id.clone(),
+            deposit_no,
+            claimed_at: now,
+        }
+        .publish(env);
+    }
     storage::bump_instance(env);
     Ok(deposit_nos.len())
 }
