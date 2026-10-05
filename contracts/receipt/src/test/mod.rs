@@ -7,6 +7,7 @@ mod exit;
 mod layout;
 mod lock;
 mod mint;
+mod prop_focused;
 mod prop_lifecycle;
 mod prop_split;
 mod reads;
@@ -24,7 +25,9 @@ use soroban_sdk::{
     Address, Bytes, BytesN, Env, String, Symbol,
 };
 
-use crate::{Leaf, ReceiptContract, ReceiptContractClient, WeightSource, KIND_BALANCE, LEAF_VERSION};
+use crate::{
+    Leaf, ReceiptContract, ReceiptContractClient, WeightSource, KIND_BALANCE, LEAF_VERSION,
+};
 
 pub const WAREHOUSE: &str = "WH_KANO_01";
 pub const COMMODITY: &str = "MAIZE_WHITE";
@@ -238,7 +241,8 @@ pub fn node(env: &Env, left: &BytesN<32>, right: &BytesN<32>) -> BytesN<32> {
 impl Tree {
     /// Leaf hashes come from the contract's own `leaf_hash`.
     pub fn new(env: &Env, client: &ReceiptContractClient, leaves: &[Leaf]) -> Tree {
-        let hashes: std::vec::Vec<BytesN<32>> = leaves.iter().map(|l| client.leaf_hash(l)).collect();
+        let hashes: std::vec::Vec<BytesN<32>> =
+            leaves.iter().map(|l| client.leaf_hash(l)).collect();
         Tree::of_hashes(env, hashes)
     }
 

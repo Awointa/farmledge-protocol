@@ -150,9 +150,10 @@ pub fn is_claimed(env: &Env, warehouse_id: &Symbol, deposit_no: u64) -> bool {
 pub fn claim(env: &Env, warehouse_id: &Symbol, deposit_no: u64) -> bool {
     let (key, bit) = claim_key(warehouse_id, deposit_no);
     let store = env.storage().persistent();
-    let mut bits: Bytes = store
-        .get(&key)
-        .unwrap_or(Bytes::from_array(env, &[0u8; (CLAIM_CHUNK_BITS / 8) as usize]));
+    let mut bits: Bytes = store.get(&key).unwrap_or(Bytes::from_array(
+        env,
+        &[0u8; (CLAIM_CHUNK_BITS / 8) as usize],
+    ));
     let byte = bits.get_unchecked(bit / 8);
     let mask = 1u8 << (bit % 8);
     if byte & mask != 0 {

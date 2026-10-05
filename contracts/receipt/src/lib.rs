@@ -43,8 +43,8 @@ pub use anchor::{KIND_BALANCE, KIND_DEPOSIT, KIND_DISPATCH, LEAF_VERSION, MAX_TR
 pub use errors::Error;
 pub use lending::MAX_REF_LEN;
 pub use types::{
-    AnchorHead, Index, Leaf, Lock, MaybeLock, MaybeRecovery, Receipt, Recovery,
-    RecoveryResolution, Sale, Status, WeightSource, DATA_VERSION,
+    AnchorHead, Index, Leaf, Lock, MaybeLock, MaybeRecovery, Receipt, Recovery, RecoveryResolution,
+    Sale, Status, WeightSource, DATA_VERSION,
 };
 
 /// Upper bound on `moisture_pct`, in basis points of a percent (100.00%).

@@ -71,7 +71,13 @@ fn depth(leaves: u32) -> u32 {
 /// be exactly as long as that day's tree is deep, and `index` inside it, so
 /// a proof can neither stop short at an inner node nor reach a padding leaf
 /// (A9, A10).
-fn proves(env: &Env, day: &StoredDay, hash: &BytesN<32>, index: u32, proof: &Vec<BytesN<32>>) -> bool {
+fn proves(
+    env: &Env,
+    day: &StoredDay,
+    hash: &BytesN<32>,
+    index: u32,
+    proof: &Vec<BytesN<32>>,
+) -> bool {
     if index >= day.1 || proof.len() != depth(day.1) {
         return false;
     }

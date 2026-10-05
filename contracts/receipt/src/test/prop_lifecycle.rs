@@ -13,23 +13,43 @@
 //! 4. **Split lineage resolves to one sale.** Every completed recovery in a
 //!    receipt's history names a sale that exists, whose sold receipt is that
 //!    receipt or one of its ancestors, and whose buyer and lender match.
+//! 5. **One lot is never two receipts.** Every receipt of a
+//!    `deposit_no` descends from one minted receipt, and that number is
+//!    claimed on-chain.
+//! 6. **Anchors are strictly ordered and never ahead of the ledger.** An
+//!    anchor is accepted exactly when its day is after the warehouse's last
+//!    and not after the ledger's current day.
 //!
 //! And a rejected call leaves no side effects at all.
+//!
+//! Minting goes through anchors, and the books are adversarial: each day's
+//! tree holds any lots, of any kind, at any weight, the same lot more than
+//! once, and never marks a lot as minted. Mints are attempted from any
+//! anchored day's leaves, stale ones included. Whether each anchor, mint and
+//! pre-claim succeeds is predicted from a model and checked.
 //!
 //! `mock_all_auths` is in force: authorisation has its own tests. This one is
 //! about what state the contract can be driven into by parties who *are*
 //! allowed to act.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::vec;
 
 use proptest::prelude::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
-    Address, Env, String,
+    Address, BytesN, Env, String, Vec,
 };
 
 use super::{next_id, setup_lending};
-use crate::{MaybeLock, MaybeRecovery, Receipt, RecoveryResolution, Sale, Status};
+use crate::{
+    Leaf, MaybeLock, MaybeRecovery, Receipt, RecoveryResolution, Sale, Status, WeightSource,
+    KIND_BALANCE,
+};
+
+/// Lots the adversarial books draw from: deposit numbers `LOT_BASE..+LOTS`.
+const LOTS: u64 = 6;
+const LOT_BASE: u64 = 100;
 
 /// Which receipt an operation acts on. Most of the time it is one whose
 /// status the operation accepts, so sequences actually reach locks,
@@ -49,8 +69,20 @@ fn target() -> impl Strategy<Value = Target> {
 
 #[derive(Clone, Debug)]
 enum Op {
+    /// Anchor a day `step` after the last one (0 or less: out of order), or
+    /// `ahead` days after the ledger's, over these (lot, kind, kg) leaves.
+    Anchor {
+        step: i64,
+        ahead: Option<u32>,
+        leaves: std::vec::Vec<(u64, u32, u64)>,
+    },
+    /// Mint from any leaf of the latest anchored day, or of any day.
     Mint {
-        kg: u64,
+        day: Option<usize>,
+        leaf: usize,
+    },
+    Preclaim {
+        lot: u64,
     },
     Lock {
         target: Target,
@@ -87,9 +119,22 @@ enum Op {
     },
 }
 
+/// Mostly balance leaves, so mints get past the kind check often.
+fn kind() -> impl Strategy<Value = u32> {
+    prop_oneof![3 => Just(KIND_BALANCE), 1 => Just(0u32), 1 => Just(1u32)]
+}
+
 fn op() -> impl Strategy<Value = Op> {
     prop_oneof![
-        1 => (1u64..50_000).prop_map(|kg| Op::Mint { kg }),
+        3 => (
+            -1i64..=3,
+            prop::option::weighted(0.1, 0u32..3),
+            prop::collection::vec((0..LOTS, kind(), 1u64..50_000), 1..5),
+        )
+            .prop_map(|(step, ahead, leaves)| Op::Anchor { step, ahead, leaves }),
+        5 => (prop::option::weighted(0.4, any::<usize>()), any::<usize>())
+            .prop_map(|(day, leaf)| Op::Mint { day, leaf }),
+        1 => (0..LOTS).prop_map(|lot| Op::Preclaim { lot }),
         3 => (target(), 1u64..=100, 0usize..2)
             .prop_map(|(target, pct, lender)| Op::Lock { target, pct, lender }),
         2 => (target(), 1u64..=100).prop_map(|(target, pct)| Op::Unlock { target, pct }),
@@ -100,7 +145,7 @@ fn op() -> impl Strategy<Value = Op> {
         2 => (target(), 0usize..2)
             .prop_map(|(target, buyer)| Op::CompleteRecovery { target, buyer }),
         2 => any::<usize>().prop_map(|sale| Op::Settle { sale }),
-        2 => (0u64..3_000).prop_map(|secs| Op::Wait { secs }),
+        2 => (0u64..3 * 86_400).prop_map(|secs| Op::Wait { secs }),
     ]
 }
 
@@ -220,17 +265,25 @@ proptest! {
     fn every_sequence_of_calls_preserves_the_invariants(
         first_kg in 2u64..1_000_000,
         bags in 0u32..1_000,
-        ops in prop::collection::vec(op(), 1..40),
+        ops in prop::collection::vec(op(), 1..60),
     ) {
         let env = Env::default();
         let l = setup_lending(&env);
         let lenders = [l.lender.clone(), Address::generate(&env)];
         let buyers = [Address::generate(&env), Address::generate(&env)];
+        let wh = l.f.warehouse.clone();
 
         // root receipt id -> kg minted for it
         let mut minted: BTreeMap<u64, u64> = BTreeMap::new();
         minted.insert(l.f.mint_weighing(&env, "DEP-0", first_kg, bags), first_kg);
-        let mut deposits = 1u32;
+        // The model: numbers claimed, the last anchored day, and every
+        // anchored day's leaves with their proofs.
+        let mut claimed: BTreeSet<u64> = BTreeSet::new();
+        claimed.insert(1);
+        let mut latest = l.f.client.get_anchor(&wh).day;
+        let mut days: std::vec::Vec<(std::vec::Vec<Leaf>, std::vec::Vec<Vec<BytesN<32>>>)> =
+            std::vec::Vec::new();
+        let mut salt = 0u8;
 
         // State that must never change once reached.
         let mut settled: BTreeMap<u64, Option<String>> = BTreeMap::new();
@@ -240,6 +293,7 @@ proptest! {
         let mut sold_after: BTreeMap<u64, u64> = BTreeMap::new();
 
         for op in ops {
+            let head_before = l.f.client.get_anchor(&wh);
             let before = (receipts(&l), sales(&l));
             let ids: std::vec::Vec<u64> = before.0.keys().copied().collect();
             let sale_ids: std::vec::Vec<u64> = before.1.keys().copied().collect();
@@ -261,12 +315,69 @@ proptest! {
             let text = |s: &str| String::from_str(&env, s);
 
             let failed = match &op {
-                Op::Mint { kg } => {
-                    let deposit = std::format!("DEP-{deposits}");
-                    deposits += 1;
-                    let id = l.f.mint_weighing(&env, &deposit, *kg, 10);
-                    minted.insert(id, *kg);
-                    false
+                Op::Anchor { step, ahead, leaves } => {
+                    let today = (now / 86_400) as u32;
+                    let day = match ahead {
+                        Some(a) => today + 1 + a,
+                        None => (latest as i64 + step) as u32,
+                    };
+                    let mut books: std::vec::Vec<Leaf> = leaves
+                        .iter()
+                        .map(|(lot, kind, kg)| {
+                            let mut leaf = l.f.balance_leaf(&env, "DEP", *kg, 10, WeightSource::Scale);
+                            leaf.deposit_no = LOT_BASE + lot;
+                            leaf.kind = *kind;
+                            salt = salt.wrapping_add(1);
+                            leaf.salt = BytesN::from_array(&env, &[salt; 32]);
+                            leaf
+                        })
+                        .collect();
+                    for (i, leaf) in books.iter_mut().enumerate() {
+                        leaf.day = day;
+                        leaf.index = i as u32;
+                    }
+                    let tree = super::Tree::new(&env, &l.f.client, &books);
+                    let res = l.f.client.try_anchor(
+                        &l.f.custodian, &wh, &day, &tree.root(), &(books.len() as u32));
+                    // Invariant 6.
+                    let expected = day > latest && day <= today;
+                    prop_assert_eq!(res.is_ok(), expected,
+                        "anchor of day {} (last {}, today {})", day, latest, today);
+                    if res.is_ok() {
+                        latest = day;
+                        let proofs = (0..books.len()).map(|i| tree.proof(&env, i)).collect();
+                        days.push((books, proofs));
+                    }
+                    res.is_err()
+                }
+                Op::Mint { day, leaf } => {
+                    if days.is_empty() {
+                        true
+                    } else {
+                        let pick = day.map_or(days.len() - 1, |d| d % days.len());
+                        let (books, proofs) = &days[pick];
+                        let i = leaf % books.len();
+                        let leaf = &books[i];
+                        let res = l.f.client.try_mint_from_anchor(
+                            &l.f.custodian, &l.f.verifier, leaf, &proofs[i]);
+                        let expected = leaf.day == latest
+                            && leaf.kind == KIND_BALANCE
+                            && !claimed.contains(&leaf.deposit_no);
+                        prop_assert_eq!(res.is_ok(), expected,
+                            "mint of lot {} kind {} from day {} (latest {})",
+                            leaf.deposit_no, leaf.kind, leaf.day, latest);
+                        if let Ok(Ok(id)) = res {
+                            claimed.insert(leaf.deposit_no);
+                            minted.insert(id, leaf.kg);
+                        }
+                        res.is_err()
+                    }
+                }
+                Op::Preclaim { lot } => {
+                    let no = LOT_BASE + lot;
+                    let res = l.f.client.try_preclaim(&wh, &Vec::from_array(&env, [no]));
+                    prop_assert_eq!(res.is_ok(), claimed.insert(no), "preclaim of {}", no);
+                    res.is_err()
                 }
                 Op::Lock { target, pct, lender } => {
                     let id = pick_from(*target, &[Status::Active]);
@@ -333,8 +444,16 @@ proptest! {
             };
 
             let after = (receipts(&l), sales(&l));
+            let head_after = l.f.client.get_anchor(&wh);
             if failed {
                 prop_assert_eq!(&after, &before, "a rejected {:?} left side effects", op);
+                prop_assert_eq!(&head_after, &head_before, "a rejected {:?} moved the head", op);
+            }
+            // 6. The head only moves forward, and never past today.
+            prop_assert!(head_after.day >= head_before.day);
+            prop_assert!(head_after.day <= (env.ledger().timestamp() / 86_400) as u32);
+            for no in &claimed {
+                prop_assert!(l.f.client.is_claimed(&wh, no), "{} not claimed on-chain", no);
             }
             let (all, all_sales) = after;
 
@@ -354,6 +473,17 @@ proptest! {
                 }
             }
             prop_assert_eq!(&total, &minted, "weight changed after {:?}", op);
+
+            // 5. One lot, one minted receipt: every receipt of a deposit
+            //    number shares one root, and that number is claimed.
+            let mut root_of_lot: BTreeMap<u64, u64> = BTreeMap::new();
+            for r in all.values() {
+                let root = root_of(&all, r.receipt_id);
+                let first = *root_of_lot.entry(r.deposit_no).or_insert(root);
+                prop_assert_eq!(first, root,
+                    "deposit_no {} became two receipts, {} and {}", r.deposit_no, first, root);
+                prop_assert!(claimed.contains(&r.deposit_no));
+            }
 
             // 2. Exactly one state, and terminal receipts are frozen.
             for r in all.values() {

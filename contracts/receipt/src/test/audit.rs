@@ -17,7 +17,10 @@ use crate::storage::DataKey;
 use crate::{Error, Leaf, WeightSource, KIND_DEPOSIT, KIND_DISPATCH};
 
 fn mint(f: &Fixture, leaf: &Leaf, proof: &Vec<BytesN<32>>) -> Result<u64, Error> {
-    match f.client.try_mint_from_anchor(&f.custodian, &f.verifier, leaf, proof) {
+    match f
+        .client
+        .try_mint_from_anchor(&f.custodian, &f.verifier, leaf, proof)
+    {
         Ok(Ok(id)) => Ok(id),
         Err(Ok(e)) => Err(e),
         other => panic!("unexpected result {other:?}"),
@@ -59,7 +62,10 @@ fn a1_one_lot_cannot_be_minted_twice_through_leaves_from_two_days() {
     let proofs = f.anchor_next_day(&env, &mut day2);
     assert_ne!(day2[1].index, day1[0].index);
 
-    assert_eq!(mint(&f, &day2[1], &proofs[1]), Err(Error::DuplicateDepositId));
+    assert_eq!(
+        mint(&f, &day2[1], &proofs[1]),
+        Err(Error::DuplicateDepositId)
+    );
     assert!(f.client.is_claimed(&f.warehouse, &lot.deposit_no));
     assert_eq!(f.client.get_receipt(&first).deposit_no, lot.deposit_no);
     // The other lot on that day is untouched by the guard.
@@ -78,7 +84,10 @@ fn a1_one_lot_cannot_be_minted_twice_from_two_leaves_of_one_day() {
     let proofs = f.anchor_next_day(&env, &mut day);
 
     assert!(mint(&f, &day[0], &proofs[0]).is_ok());
-    assert_eq!(mint(&f, &day[1], &proofs[1]), Err(Error::DuplicateDepositId));
+    assert_eq!(
+        mint(&f, &day[1], &proofs[1]),
+        Err(Error::DuplicateDepositId)
+    );
 }
 
 /// The key is `(warehouse_id, deposit_no)`: deposit numbers are per
@@ -145,7 +154,10 @@ fn a6_a_balance_leaf_from_an_earlier_day_cannot_mint() {
     let mut today = [again(&env, &lot, 500)];
     let p2 = f.anchor_next_day(&env, &mut today);
 
-    assert!(f.client.verify_leaf(&yesterday[0], &p1[0]), "yesterday's root is still on-chain");
+    assert!(
+        f.client.verify_leaf(&yesterday[0], &p1[0]),
+        "yesterday's root is still on-chain"
+    );
     assert_eq!(mint(&f, &yesterday[0], &p1[0]), Err(Error::StaleLeaf));
     let id = mint(&f, &today[0], &p2[0]).unwrap();
     assert_eq!(f.client.get_receipt(&id).weight_kg, 500);
@@ -191,9 +203,18 @@ fn a8_every_receipt_field_comes_from_the_proven_leaf() {
     assert_eq!(r.weight_source, leaf.weight_source);
     assert_eq!(r.bag_count, leaf.bags);
     assert_eq!(r.moisture_pct, leaf.moisture_bps);
-    assert_eq!(r.custodian, intake_custodian, "the intake's custodian, not the mint's");
-    assert_eq!(r.verifier, intake_verifier, "the intake's verifier, not the mint's");
-    assert_eq!(r.deposit_date, leaf.deposited_at, "the intake's date, not the mint's");
+    assert_eq!(
+        r.custodian, intake_custodian,
+        "the intake's custodian, not the mint's"
+    );
+    assert_eq!(
+        r.verifier, intake_verifier,
+        "the intake's verifier, not the mint's"
+    );
+    assert_eq!(
+        r.deposit_date, leaf.deposited_at,
+        "the intake's date, not the mint's"
+    );
 }
 
 /// The proof binds every field: change any one after anchoring and the mint
@@ -235,7 +256,8 @@ fn a11_day_zero_is_not_a_never_anchored_sentinel() {
     f.client.anchor(&f.custodian, &f.warehouse, &0, &root, &1);
     let other = BytesN::from_array(&env, &[2; 32]);
     assert_eq!(
-        f.client.try_anchor(&f.custodian, &f.warehouse, &0, &other, &1),
+        f.client
+            .try_anchor(&f.custodian, &f.warehouse, &0, &other, &1),
         Err(Ok(Error::AnchorOutOfOrder))
     );
     assert_eq!(f.client.get_anchor(&f.warehouse).day, 0);
@@ -252,21 +274,28 @@ fn a11_a_day_after_the_ledger_day_cannot_be_anchored() {
 
     for day in [today + 1, today + 365, u32::MAX] {
         assert_eq!(
-            f.client.try_anchor(&f.custodian, &f.warehouse, &day, &root, &1),
+            f.client
+                .try_anchor(&f.custodian, &f.warehouse, &day, &root, &1),
             Err(Ok(Error::AnchorInFuture))
         );
     }
-    assert_eq!(f.client.try_get_anchor(&f.warehouse), Err(Ok(Error::NoAnchor)));
+    assert_eq!(
+        f.client.try_get_anchor(&f.warehouse),
+        Err(Ok(Error::NoAnchor))
+    );
     // Today is not in the future, and anchoring it does not depend on what
     // was attempted before.
-    f.client.anchor(&f.custodian, &f.warehouse, &today, &root, &1);
+    f.client
+        .anchor(&f.custodian, &f.warehouse, &today, &root, &1);
     // Tomorrow becomes anchorable once the ledger reaches it, not before.
     assert_eq!(
-        f.client.try_anchor(&f.custodian, &f.warehouse, &(today + 1), &root, &1),
+        f.client
+            .try_anchor(&f.custodian, &f.warehouse, &(today + 1), &root, &1),
         Err(Ok(Error::AnchorInFuture))
     );
     env.ledger().set_timestamp((today as u64 + 1) * 86_400);
-    f.client.anchor(&f.custodian, &f.warehouse, &(today + 1), &root, &1);
+    f.client
+        .anchor(&f.custodian, &f.warehouse, &(today + 1), &root, &1);
 }
 
 // --- A19: lots held on an earlier contract are pre-claimed -------------------
@@ -280,12 +309,16 @@ fn a19_a_preclaimed_lot_can_never_be_minted() {
     let f = setup(&env);
 
     let lot = scale_leaf(&env, &f, "DEP-V2", 2_000);
-    f.client.preclaim(&f.warehouse, &Vec::from_array(&env, [lot.deposit_no]));
+    f.client
+        .preclaim(&f.warehouse, &Vec::from_array(&env, [lot.deposit_no]));
     assert!(f.client.is_claimed(&f.warehouse, &lot.deposit_no));
 
     let mut day = [lot];
     let proofs = f.anchor_next_day(&env, &mut day);
-    assert_eq!(mint(&f, &day[0], &proofs[0]), Err(Error::DuplicateDepositId));
+    assert_eq!(
+        mint(&f, &day[0], &proofs[0]),
+        Err(Error::DuplicateDepositId)
+    );
 }
 
 /// Admin only, all-or-nothing, and a number already claimed is an error
@@ -340,7 +373,8 @@ fn a19_a_leaf_naming_a_receipt_cannot_mint() {
 fn a3_the_claim_bitmap_is_persistent_storage() {
     let env = Env::default();
     let f = setup(&env);
-    f.client.preclaim(&f.warehouse, &Vec::from_array(&env, [5u64, 1_029]));
+    f.client
+        .preclaim(&f.warehouse, &Vec::from_array(&env, [5u64, 1_029]));
 
     env.as_contract(&f.contract_id, || {
         for chunk in [0u64, 1] {
@@ -356,9 +390,21 @@ fn a3_the_claim_bitmap_is_persistent_storage() {
 fn a4_claims_land_in_their_own_bit() {
     let env = Env::default();
     let f = setup(&env);
-    f.client.preclaim(&f.warehouse, &Vec::from_array(&env, [0u64, 1_023, 1_024]));
-    for (n, claimed) in [(0u64, true), (1, false), (1_022, false), (1_023, true), (1_024, true), (1_025, false)] {
-        assert_eq!(f.client.is_claimed(&f.warehouse, &n), claimed, "deposit_no {n}");
+    f.client
+        .preclaim(&f.warehouse, &Vec::from_array(&env, [0u64, 1_023, 1_024]));
+    for (n, claimed) in [
+        (0u64, true),
+        (1, false),
+        (1_022, false),
+        (1_023, true),
+        (1_024, true),
+        (1_025, false),
+    ] {
+        assert_eq!(
+            f.client.is_claimed(&f.warehouse, &n),
+            claimed,
+            "deposit_no {n}"
+        );
     }
 }
 
@@ -423,7 +469,13 @@ fn a12_an_anchored_day_cannot_be_replaced() {
 
     for earlier_or_same in [d, d - 1] {
         assert_eq!(
-            f.client.try_anchor(&f.custodian, &f.warehouse, &earlier_or_same, &BytesN::from_array(&env, &[9; 32]), &1),
+            f.client.try_anchor(
+                &f.custodian,
+                &f.warehouse,
+                &earlier_or_same,
+                &BytesN::from_array(&env, &[9; 32]),
+                &1
+            ),
             Err(Ok(Error::AnchorOutOfOrder))
         );
     }
@@ -454,16 +506,28 @@ fn a13_only_a_custodian_of_the_warehouse_can_anchor_it() {
         &env,
         &f.contract_id,
         "anchor",
-        (theirs.clone(), f.warehouse.clone(), 1u32, root.clone(), 1u32).into_val(&env),
+        (
+            theirs.clone(),
+            f.warehouse.clone(),
+            1u32,
+            root.clone(),
+            1u32,
+        )
+            .into_val(&env),
         &[&theirs],
     );
-    assert!(f.client.try_anchor(&f.custodian, &f.warehouse, &1, &root, &1).is_err(),
-        "the named custodian must sign");
+    assert!(
+        f.client
+            .try_anchor(&f.custodian, &f.warehouse, &1, &root, &1)
+            .is_err(),
+        "the named custodian must sign"
+    );
     env.mock_all_auths();
 
     f.client.remove_custodian(&f.warehouse, &f.custodian);
     assert_eq!(
-        f.client.try_anchor(&f.custodian, &f.warehouse, &1, &root, &1),
+        f.client
+            .try_anchor(&f.custodian, &f.warehouse, &1, &root, &1),
         Err(Ok(Error::CustodianNotRegistered))
     );
 }

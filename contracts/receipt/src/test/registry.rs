@@ -217,11 +217,18 @@ fn deregistering_a_custodian_stops_them_minting_and_anchoring() {
     f.client.remove_custodian(&f.warehouse, &f.custodian);
 
     assert_eq!(
-        f.client.try_mint_from_anchor(&f.custodian, &f.verifier, &day[0], &proofs[0]),
+        f.client
+            .try_mint_from_anchor(&f.custodian, &f.verifier, &day[0], &proofs[0]),
         Err(Ok(Error::CustodianNotRegistered))
     );
     assert_eq!(
-        f.client.try_anchor(&f.custodian, &f.warehouse, &f.next_day(), &f.client.leaf_hash(&day[0]), &1),
+        f.client.try_anchor(
+            &f.custodian,
+            &f.warehouse,
+            &f.next_day(),
+            &f.client.leaf_hash(&day[0]),
+            &1
+        ),
         Err(Ok(Error::CustodianNotRegistered))
     );
 }
@@ -236,7 +243,8 @@ fn deregistering_a_verifier_stops_them_minting() {
     f.client.remove_verifier(&f.verifier);
 
     assert_eq!(
-        f.client.try_mint_from_anchor(&f.custodian, &f.verifier, &day[0], &proofs[0]),
+        f.client
+            .try_mint_from_anchor(&f.custodian, &f.verifier, &day[0], &proofs[0]),
         Err(Ok(Error::VerifierNotRegistered))
     );
 }
@@ -252,7 +260,8 @@ fn deregistering_a_warehouse_stops_minting_against_it() {
     f.client.remove_warehouse(&f.warehouse);
 
     assert_eq!(
-        f.client.try_mint_from_anchor(&f.custodian, &f.verifier, &day[0], &proofs[0]),
+        f.client
+            .try_mint_from_anchor(&f.custodian, &f.verifier, &day[0], &proofs[0]),
         Err(Ok(Error::WarehouseNotRegistered)),
         "an orphaned custodian registration must not keep the warehouse alive"
     );

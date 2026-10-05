@@ -440,7 +440,9 @@ fn an_archived_claim_chunk_still_blocks_a_duplicate_mint() {
     let f = setup(&env);
     let mut day = [f.balance_leaf(&env, "DEP-DONE", 2_000, 20, crate::WeightSource::Scale)];
     let proofs = f.anchor_next_day(&env, &mut day);
-    let id = f.client.mint_from_anchor(&f.custodian, &f.verifier, &day[0], &proofs[0]);
+    let id = f
+        .client
+        .mint_from_anchor(&f.custodian, &f.verifier, &day[0], &proofs[0]);
     f.client.exit(&id, &f.custodian, &2_000, &1_990);
     let before = f.client.get_receipt(&id);
 
@@ -450,13 +452,17 @@ fn an_archived_claim_chunk_still_blocks_a_duplicate_mint() {
     // the ledger moves past the chunk's last live ledger.
     env.ledger()
         .set_sequence_number(ENTRY_TTL_EXTEND_TO + DAY_IN_LEDGERS);
-    assert!(env.ledger().sequence() > live_until, "the chunk has archived");
+    assert!(
+        env.ledger().sequence() > live_until,
+        "the chunk has archived"
+    );
 
     // The same lot again, in a fresh day's books.
     let mut again = [day[0].clone()];
     let proofs = f.anchor_next_day(&env, &mut again);
     assert_eq!(
-        f.client.try_mint_from_anchor(&f.custodian, &f.verifier, &again[0], &proofs[0]),
+        f.client
+            .try_mint_from_anchor(&f.custodian, &f.verifier, &again[0], &proofs[0]),
         Err(Ok(Error::DuplicateDepositId))
     );
     assert_eq!(f.client.get_receipt(&id), before);
