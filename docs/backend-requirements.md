@@ -4,6 +4,12 @@ What the protocol needs from the Farmledge backend to be correct. These are
 **correctness requirements**: missing one loses data or verifiability, and
 is treated as a bug with the same priority as a contract bug.
 
+**Conformance.** The nine invariants these requirements add up to (README,
+"Contract frozen") are specified one by one, with an executable check for
+each, in [`conformance/`](../conformance/README.md). A backend conforms
+when `conformance/farmledge_conformance.py` passes all nine on its export,
+offline and with `--rpc`.
+
 | | applies | detail |
 |---|---|---|
 | 1. Indexer: archive every event durably, alert when a day behind, check for gaps after outages, back up | now | `docs/events.md` ("Indexer requirements") |
