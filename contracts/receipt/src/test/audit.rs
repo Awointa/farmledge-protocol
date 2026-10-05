@@ -356,13 +356,19 @@ fn a19_a_leaf_naming_a_receipt_cannot_mint() {
     let env = Env::default();
     let f = setup(&env);
 
-    let mut v2 = scale_leaf(&env, &f, "DEP-V2", 2_000);
-    v2.receipt_id = 41;
-    v2.receipt_version = 2;
-    let mut day = [v2];
+    // Either field on its own is enough.
+    let mut both = scale_leaf(&env, &f, "DEP-V2", 2_000);
+    (both.receipt_id, both.receipt_version) = (41, 2);
+    let mut id_only = scale_leaf(&env, &f, "DEP-V2-ID", 2_000);
+    id_only.receipt_id = 42;
+    let mut version_only = scale_leaf(&env, &f, "DEP-V2-VER", 2_000);
+    version_only.receipt_version = 2;
+    let mut day = [both, id_only, version_only];
     let proofs = f.anchor_next_day(&env, &mut day);
-    assert_eq!(mint(&f, &day[0], &proofs[0]), Err(Error::LeafHasReceipt));
-    assert!(!f.client.is_claimed(&f.warehouse, &day[0].deposit_no));
+    for (leaf, proof) in day.iter().zip(&proofs) {
+        assert_eq!(mint(&f, leaf, proof), Err(Error::LeafHasReceipt));
+        assert!(!f.client.is_claimed(&f.warehouse, &leaf.deposit_no));
+    }
 }
 
 // --- sound checks that must stay sound ---------------------------------------
@@ -381,6 +387,9 @@ fn a3_the_claim_bitmap_is_persistent_storage() {
             let key = DataKey::Claimed(f.warehouse.clone(), chunk);
             assert!(env.storage().persistent().has(&key), "chunk {chunk}");
             assert!(!env.storage().temporary().has(&key));
+            // One bit per number: 128 bytes, whatever the rent would bear.
+            let bits: Bytes = env.storage().persistent().get(&key).unwrap();
+            assert_eq!(bits.len(), 128);
         }
     });
 }
@@ -437,8 +446,33 @@ fn a10_a_proof_of_the_wrong_length_or_position_is_rejected() {
     assert!(mint(&f, leaf, &proofs[2]).is_ok());
 }
 
-/// A10: an inner node of an anchored tree is not a leaf. Anchoring a node's
-/// children as a one-leaf "day" is refused by the depth check.
+/// A10: the fold only reads as many bits of `index` as the tree is deep, so
+/// a leaf whose `index` lies outside its day (a backend bug) can still fold
+/// to the root. The range check refuses it on its own.
+#[test]
+fn a10_a_leaf_indexed_outside_its_day_is_rejected_even_when_the_proof_folds() {
+    let env = Env::default();
+    let f = setup(&env);
+    let day = f.next_day();
+
+    // Two leaves; the first sits at position 0 but says index 2, which
+    // folds exactly like 0 in a one-level tree.
+    let mut odd = scale_leaf(&env, &f, "DEP-1", 1_000);
+    let mut other = scale_leaf(&env, &f, "DEP-2", 1_000);
+    (odd.day, odd.index) = (day, 2);
+    (other.day, other.index) = (day, 1);
+    let tree = Tree::new(&env, &f.client, &[odd.clone(), other]);
+    f.client
+        .anchor(&f.custodian, &f.warehouse, &day, &tree.root(), &2);
+    let proof = tree.proof(&env, 0);
+
+    assert_eq!(mint(&f, &odd, &proof), Err(Error::InvalidProof));
+    assert!(!f.client.verify_leaf(&odd, &proof));
+}
+
+/// A10: an inner node of an anchored tree is not a leaf. Leaf hashes are
+/// `sha256(0x00 || XDR(leaf))` and nodes `sha256(0x01 || left || right)`, so
+/// no leaf can hash to a node; the contract's `leaf_hash` uses the prefix.
 #[test]
 fn a10_an_inner_node_cannot_pass_as_a_leaf() {
     let env = Env::default();
@@ -552,6 +586,16 @@ fn a14_a15_the_head_is_persistent_and_the_day_root_temporary() {
         assert_eq!(
             soroban_sdk::testutils::storage::Temporary::get_ttl(&env.storage().temporary(), &root),
             crate::storage::DAY_ROOT_TTL
+        );
+    });
+    // 30 days, in ledgers: still there on day 29.
+    assert_eq!(crate::storage::DAY_ROOT_TTL, 30 * 17_280);
+    env.ledger().with_mut(|l| l.sequence_number += 29 * 17_280);
+    env.as_contract(&f.contract_id, || {
+        let root = DataKey::DayRoot(f.warehouse.clone(), d);
+        assert!(
+            env.storage().temporary().has(&root),
+            "a day root lasts 30 days"
         );
     });
 }
