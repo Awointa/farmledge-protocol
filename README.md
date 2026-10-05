@@ -10,7 +10,8 @@
 >
 > **What the contract cannot enforce, the backend must.** Each of these is a
 > correctness requirement, as serious as a contract bug, and the contract
-> relies on all of them:
+> relies on all of them. [`conformance/`](conformance/README.md) checks any
+> backend against all nine, offline and against the chain:
 >
 > 1. **Freshness: freeze a lot before minting it.** No dispatch of a lot may
 >    be recorded between the cutoff of the anchored day its mint uses and
@@ -367,6 +368,7 @@ contracts/receipt/src/
 ├── admin.rs      admin and the warehouse/custodian/verifier/operator registries
 └── test/         per-area tests, adversarial cases, property tests
 docs/             events, archival, storage strategy, backend requirements, upgrade, adversarial review
+conformance/      the nine backend invariants: specification, checker, self-tests
 scripts/          deploy.sh, measure_costs.py (Testnet costs), cost_model.py,
                   verify_proof.py (standalone proof check), check_events_doc.py
 deployments/      the current deployment record per network
