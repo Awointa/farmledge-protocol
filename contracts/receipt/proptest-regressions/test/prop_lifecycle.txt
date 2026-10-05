@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 313f0aac3e66b08d37e977b086670b7b6eb449f59936855fb754c09faec9bd31 # shrinks to first_kg = 29, bags = 0, ops = [Lock { target: Target { index: 0, wild: false }, pct: 32, lender: 0 }, Lock { target: Target { index: 957887786, wild: false }, pct: 21, lender: 0 }, Exit { target: Target { index: 13024229508480693012, wild: true }, pct: 5 }, Lock { target: Target { index: 2613834001357597750, wild: false }, pct: 89, lender: 0 }, Revoke { target: Target { index: 9479294972151741737, wild: false } }, Lock { target: Target { index: 8815384818805832247, wild: false }, pct: 50, lender: 1 }, Unlock { target: Target { index: 8687199669390910812, wild: false }, pct: 47 }, Lock { target: Target { index: 14717244460239220735, wild: false }, pct: 88, lender: 1 }, Wait { secs: 1297 }, StartRecovery { target: Target { index: 4446710485893661777, wild: false } }, CompleteRecovery { target: Target { index: 15770446538727532404, wild: true }, buyer: 1 }, Settle { sale: 9080416764270869739 }, Settle { sale: 10157615518768335721 }]

@@ -1,258 +1,565 @@
 #![no_std]
+//! Farmledge digital warehouse receipts.
+//!
+//! One contract for all commodities — commodity is a field on the receipt,
+//! not a separate deployment.
+//!
+//! Covers daily anchoring of each warehouse's books (`anchor`), minting on
+//! demand from them (`mint_from_anchor`, `preclaim`), the deposit-to-exit
+//! lifecycle (`exit`, `revoke`, `extend_ttl`, `extend_ttl_batch`,
+//! `extend_index_ttl`) and the lending lifecycle (`lock`, `unlock`,
+//! `extend_due`, `start_recovery`, `complete_recovery`,
+//! `record_settlement`). The legal status transitions are listed on
+//! [`Status`]. There is deliberately no user-to-user transfer, and no fees,
+//! pricing or settlement on-chain.
+//!
+//! The contract is **immutable**: there is no entry point that replaces its
+//! Wasm. Changes ship as a new deployment; see `docs/upgrade.md`.
+//!
+//! Soroban has no implicit caller identity. Every address whose signature an
+//! operation needs is an explicit parameter that gets `require_auth()`d;
+//! privileged addresses (the admin) are loaded from storage instead, because
+//! authorising a caller-supplied address proves only that the caller controls
+//! it, not that it is allowed to do anything.
 
 mod admin;
+mod anchor;
 mod errors;
 mod events;
+mod layout;
+mod lending;
+mod split;
 mod storage;
 mod types;
 
 #[cfg(test)]
+extern crate std;
+#[cfg(test)]
 mod test;
 
-use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol};
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Symbol, Vec};
 
+pub use anchor::{KIND_BALANCE, KIND_DEPOSIT, KIND_DISPATCH, LEAF_VERSION, MAX_TREE_DEPTH};
 pub use errors::Error;
-pub use types::{Lock, Receipt, Recovery, Status, WeightSource};
+pub use lending::MAX_REF_LEN;
+pub use types::{
+    AnchorHead, Index, Leaf, Lock, MaybeLock, MaybeRecovery, Receipt, Recovery, RecoveryResolution,
+    Sale, Status, WeightSource, DATA_VERSION,
+};
+
+/// Upper bound on `moisture_pct`, in basis points of a percent (100.00%).
+const MAX_MOISTURE_BPS: u32 = 10_000;
+
+/// Most receipts (or index pages) one keep-alive call may name. Sized from
+/// measured Testnet costs, not guessed — see `docs/archival.md`.
+pub const MAX_TTL_BATCH: u32 = 25;
 
 #[contract]
 pub struct ReceiptContract;
 
 #[contractimpl]
 impl ReceiptContract {
-    /// One-time setup. `admin` is expected to be a Stellar multisig account
-    /// (2-of-3) per design doc §6 — the contract only checks `require_auth`
-    /// on it and never implements multisig logic itself.
-    pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
-        if admin::get_admin(&env).is_some() {
-            return Err(Error::AlreadyInitialized);
-        }
-        admin.require_auth();
+    /// Runs once, inside the deploy transaction itself.
+    ///
+    /// A constructor rather than an `initialize` call, so there is no window
+    /// between deploy and setup in which someone else could claim the admin
+    /// role. `admin` does not sign: whoever deploys chooses it, and naming
+    /// an address as admin grants it nothing it did not already control.
+    ///
+    /// `admin` will be a Stellar multisig account in production; the contract
+    /// only ever calls `require_auth()` on it and implements no multisig
+    /// logic of its own.
+    pub fn __constructor(env: Env, admin: Address) {
         admin::set_admin(&env, &admin);
         storage::bump_instance(&env);
-        Ok(())
     }
 
-    /// Mints a receipt. Requires custodian AND verifier auth (design doc
-    /// §1.2, §4.2); rejects a repeated `deposit_id` or an unregistered
-    /// custodian/verifier. Fully implemented — this is the proven path.
-    #[allow(clippy::too_many_arguments)]
-    pub fn mint(
+    // --- lifecycle ---------------------------------------------------------
+
+    /// Commits one day of a warehouse's books: the Merkle `root` over its
+    /// `leaves` deposit, dispatch and balance leaves for UTC `day`. Signed by
+    /// a custodian registered for the warehouse.
+    ///
+    /// Days are strictly increasing per warehouse and never after the
+    /// ledger's current day, so a day can never be replaced. The head moves
+    /// to `sha256(prev_head || day || leaves || root)` and is returned; the
+    /// root is kept on-chain for 30 days, for minting, and in the `Anchored`
+    /// event for good.
+    pub fn anchor(
+        env: Env,
+        custodian: Address,
+        warehouse_id: Symbol,
+        day: u32,
+        root: BytesN<32>,
+        leaves: u32,
+    ) -> Result<BytesN<32>, Error> {
+        anchor::anchor(&env, custodian, warehouse_id, day, root, leaves)
+    }
+
+    /// Issues a receipt for a lot, from its balance leaf in the warehouse's
+    /// latest anchored day and the leaf's inclusion `proof`. Requires
+    /// **both** a custodian registered for the leaf's warehouse and a
+    /// registered verifier, attesting the lot as it is now.
+    ///
+    /// Every field of the receipt is taken from the proven leaf, and each
+    /// `(warehouse_id, deposit_no)` mints at most once, ever. The farmer
+    /// does not sign: they are the beneficiary, not an attester.
+    ///
+    /// Returns the new `receipt_id`.
+    pub fn mint_from_anchor(
         env: Env,
         custodian: Address,
         verifier: Address,
-        deposit_id: String,
-        commodity: Symbol,
-        grade: Symbol,
-        weight_kg: u64,
-        weight_source: WeightSource,
-        bag_count: u32,
-        moisture_pct: u32,
-        warehouse_id: Symbol,
-        owner: Address,
+        leaf: Leaf,
+        proof: Vec<BytesN<32>>,
     ) -> Result<u64, Error> {
-        custodian.require_auth();
-        verifier.require_auth();
+        anchor::mint_from_anchor(&env, custodian, verifier, leaf, proof)
+    }
 
-        if !admin::is_custodian(&env, &warehouse_id, &custodian) {
+    /// Claims deposit numbers so they can never be minted: the lots held as
+    /// receipts on an earlier contract, at cutover. Admin only, at most
+    /// `MAX_TTL_BATCH` numbers a call, all-or-nothing: a number already
+    /// claimed fails the call. One `Preclaimed` event per number publishes
+    /// the list. There is deliberately no way to undo a claim.
+    pub fn preclaim(env: Env, warehouse_id: Symbol, deposit_nos: Vec<u64>) -> Result<u32, Error> {
+        anchor::preclaim(&env, warehouse_id, deposit_nos)
+    }
+
+    /// Releases grain from the warehouse. Requires **both** a custodian
+    /// registered for the receipt's warehouse and the receipt's owner.
+    ///
+    /// `kg` is how much of the receipt's book weight is being retired;
+    /// `exit_weight_kg` is what the grain actually weighed on the way out.
+    /// The two differ by shrinkage, which is the point of recording both —
+    /// `weight_kg` stays the authoritative quantity so that shrinkage never
+    /// breaks the split conservation invariant.
+    ///
+    /// If `kg` is less than the receipt's weight the receipt is split first,
+    /// and the remainder stays `Active`. Only `Active` receipts can exit.
+    ///
+    /// Returns the id of the receipt that was retired — the receipt itself on
+    /// a full exit, or the new receipt split off it on a partial one. On a
+    /// partial exit the original receipt keeps its id and the rest of the
+    /// weight.
+    pub fn exit(
+        env: Env,
+        receipt_id: u64,
+        custodian: Address,
+        kg: u64,
+        exit_weight_kg: u64,
+    ) -> Result<u64, Error> {
+        let receipt = storage::get_receipt(&env, receipt_id).ok_or(Error::ReceiptNotFound)?;
+
+        // Any custodian registered for this warehouse may sign an exit, not
+        // only the one who signed the original mint.
+        custodian.require_auth();
+        receipt.owner.require_auth();
+
+        if !admin::is_custodian(&env, &receipt.warehouse_id, &custodian) {
             return Err(Error::CustodianNotRegistered);
         }
-        if !admin::is_verifier(&env, &verifier) {
-            return Err(Error::VerifierNotRegistered);
+        if receipt.status != Status::Active {
+            return Err(Error::InvalidStatus);
         }
-        if weight_kg == 0 {
-            return Err(Error::InvalidWeight);
+        if exit_weight_kg == 0 {
+            return Err(Error::InvalidExitWeight);
         }
-        if storage::has_deposit_id(&env, &deposit_id) {
-            return Err(Error::DuplicateDepositId);
+        if kg == 0 || kg > receipt.weight_kg {
+            return Err(Error::InvalidSplitAmount);
         }
 
-        let receipt_id = storage::next_receipt_id(&env);
-        let receipt = Receipt {
-            receipt_id,
-            deposit_id: deposit_id.clone(),
-            parent_id: None,
-            commodity,
-            grade,
-            weight_kg,
-            weight_source,
-            bag_count,
-            moisture_pct,
-            warehouse_id,
-            custodian,
-            verifier,
-            owner: owner.clone(),
-            status: Status::Active,
-            deposit_date: env.ledger().timestamp(),
-            exit_date: None,
-            exit_weight_kg: None,
+        let mut exiting = if kg == receipt.weight_kg {
+            receipt
+        } else {
+            split::split_receipt(&env, &receipt, kg)?.taken
         };
 
-        storage::set_receipt(&env, &receipt);
-        storage::set_deposit_index(&env, &deposit_id, receipt_id);
+        exiting.status = Status::Exited;
+        exiting.exit_date = Some(env.ledger().timestamp());
+        exiting.exit_weight_kg = Some(exit_weight_kg);
+        storage::set_receipt(&env, &exiting);
         storage::bump_instance(&env);
-        events::minted(&env, receipt_id, &deposit_id, &owner);
 
-        Ok(receipt_id)
+        events::Exited {
+            receipt_id: exiting.receipt_id,
+            warehouse_id: exiting.warehouse_id,
+            owner: exiting.owner,
+            custodian,
+            weight_kg: exiting.weight_kg,
+            bag_count: exiting.bag_count,
+            exit_weight_kg,
+            exit_date: env.ledger().timestamp(),
+        }
+        .publish(&env);
+        Ok(exiting.receipt_id)
     }
 
-    /// Read-only lookup used by the public verification page and lender
-    /// portal (design doc §2.1, §7.1) to read receipt state directly from
-    /// the chain rather than Farmledge's database. Fully implemented.
-    pub fn get_receipt(env: Env, receipt_id: u64) -> Result<Receipt, Error> {
-        storage::get_receipt(&env, receipt_id).ok_or(Error::ReceiptNotFound)
+    /// Voids a receipt. Admin only, and only from `Active` — a receipt whose
+    /// grain has already left, or that is already void, is not revocable.
+    /// Neither is a pledged one: to void a `Locked` or `Recovery` receipt the
+    /// lender unlocks it first, so a lender never has collateral disappear
+    /// from under a live loan without having signed for it.
+    ///
+    /// Intended for proven fraudulent mints. `reason` is recorded in the
+    /// event, not in storage.
+    pub fn revoke(env: Env, receipt_id: u64, reason: String) -> Result<(), Error> {
+        admin::require_admin(&env)?;
+
+        let mut receipt = storage::get_receipt(&env, receipt_id).ok_or(Error::ReceiptNotFound)?;
+        if receipt.status != Status::Active {
+            return Err(Error::InvalidStatus);
+        }
+
+        receipt.status = Status::Revoked;
+        storage::set_receipt(&env, &receipt);
+        storage::bump_instance(&env);
+
+        events::Revoked {
+            receipt_id,
+            warehouse_id: receipt.warehouse_id,
+            owner: receipt.owner,
+            weight_kg: receipt.weight_kg,
+            reason,
+            revoked_at: env.ledger().timestamp(),
+        }
+        .publish(&env);
+        Ok(())
     }
 
-    /// Requires lender AND owner auth. Splits atomically if `kg` is less
-    /// than the receipt's weight; only SCALE-weighed, ACTIVE receipts can
-    /// be locked (design doc §4.2, §4.3). Body TODO — auth checks are real.
+    /// Pushes a receipt's storage rent out. Callable by **anyone**, with no
+    /// authorisation, so a keep-alive job can run unprivileged — and so can
+    /// anyone else with an interest in the receipt surviving.
+    ///
+    /// An `Exited` or `Revoked` receipt is skipped: nothing can act on it
+    /// again, so it is left to archive, and its history lives in the
+    /// indexer's event archive. Reading it later still works; the read
+    /// restores it.
+    ///
+    /// Also bumps any `Sale` records its recovery history refers to, the
+    /// unsettled-sales list and the contract instance. Index pages are kept
+    /// alive separately by `extend_index_ttl`. The duplicate guard needs no
+    /// keep-alive: an archived claim chunk is restored when a mint reads it.
+    pub fn extend_ttl(env: Env, receipt_id: u64) -> Result<(), Error> {
+        Self::extend_ttl_batch(env.clone(), Vec::from_array(&env, [receipt_id])).map(|_| ())
+    }
+
+    /// `extend_ttl` for up to `MAX_TTL_BATCH` receipts in one transaction.
+    ///
+    /// All-or-nothing: an unknown id fails the whole batch with
+    /// `ReceiptNotFound`, because it means the caller's list has drifted
+    /// from the chain (after a Testnet reset, say) and that should be loud.
+    /// Returns the number of receipts extended, which excludes the `Exited`
+    /// and `Revoked` ones skipped.
+    ///
+    /// The keep-alive job should not send terminal ids at all: once one has
+    /// archived, naming it makes the transaction restore it (paying the
+    /// network's minimum TTL in rent) only for it to be skipped.
+    pub fn extend_ttl_batch(env: Env, receipt_ids: Vec<u64>) -> Result<u32, Error> {
+        if receipt_ids.len() > MAX_TTL_BATCH {
+            return Err(Error::BatchTooLarge);
+        }
+        let now = env.ledger().timestamp();
+        let mut extended = 0;
+        for receipt_id in receipt_ids.iter() {
+            let receipt = storage::get_receipt(&env, receipt_id).ok_or(Error::ReceiptNotFound)?;
+            if matches!(receipt.status, Status::Exited | Status::Revoked) {
+                continue;
+            }
+
+            storage::bump_receipt(&env, receipt_id);
+            // Sale records live in their own entries; keep any this receipt's
+            // history points at alive alongside it.
+            for recovery in receipt.recovery_history.iter() {
+                if let Some(sale_id) = recovery.sale_id {
+                    storage::bump_sale(&env, sale_id);
+                }
+            }
+
+            events::TtlExtended {
+                receipt_id,
+                warehouse_id: receipt.warehouse_id,
+                owner: receipt.owner,
+                status: receipt.status,
+                weight_kg: receipt.weight_kg,
+                extended_at: now,
+            }
+            .publish(&env);
+            extended += 1;
+        }
+        storage::bump_if_present(&env, &storage::DataKey::UnsettledSales);
+        storage::bump_instance(&env);
+        Ok(extended)
+    }
+
+    /// Keeps `page_count` pages of one paged index alive, starting at
+    /// `first_page`, plus the index's page counter. Callable by anyone.
+    ///
+    /// Needed because an index page is only written while it is filling: once
+    /// it holds 64 ids nothing writes it again, and without this it would be
+    /// archived ~175 days later, taking that page of the read with it. Pages
+    /// past the end are skipped. Returns the number of pages that exist in
+    /// the requested range.
+    pub fn extend_index_ttl(
+        env: Env,
+        index: Index,
+        first_page: u32,
+        page_count: u32,
+    ) -> Result<u32, Error> {
+        if page_count > MAX_TTL_BATCH {
+            return Err(Error::BatchTooLarge);
+        }
+        let (pages_key, _) = storage::index_keys(&index, 0);
+        storage::bump_if_present(&env, &pages_key);
+
+        let mut extended = 0;
+        for page in first_page..first_page.saturating_add(page_count) {
+            let (_, page_key) = storage::index_keys(&index, page);
+            if env.storage().persistent().has(&page_key) {
+                storage::bump(&env, &page_key);
+                extended += 1;
+            }
+        }
+        storage::bump_instance(&env);
+        Ok(extended)
+    }
+
+    // --- lending -----------------------------------------------------------
+
+    /// Pledges `kg` of an `Active`, scale-weighed receipt to `lender`.
+    /// Requires **both** the lender's and the owner's authorisation, and
+    /// `lender != owner`.
+    ///
+    /// If `kg` is less than the receipt's weight the receipt is split first:
+    /// only that portion is locked and the remainder stays `Active` under the
+    /// owner. `due_date` (ledger timestamp) must be in the future;
+    /// `grace_period` is seconds after it before recovery may start.
+    ///
+    /// Returns the id of the locked receipt — the receipt itself on a full
+    /// lock, or the new receipt split off it on a partial one, in which case
+    /// the original keeps its id and the unpledged remainder.
     pub fn lock(
         env: Env,
         receipt_id: u64,
-        kg: u64,
         lender: Address,
+        kg: u64,
         loan_ref: String,
         due_date: u64,
         grace_period: u64,
     ) -> Result<u64, Error> {
-        lender.require_auth();
-        let receipt = storage::get_receipt(&env, receipt_id).ok_or(Error::ReceiptNotFound)?;
-        receipt.owner.require_auth();
-
-        let _ = (kg, loan_ref, due_date, grace_period);
-        todo!(
-            "reject if weight_source != Scale or status != Active; split if kg < weight_kg; \
-             set status Locked, store Lock, emit events::locked (+ events::split if partial)"
+        lending::lock(
+            &env,
+            receipt_id,
+            lender,
+            kg,
+            loan_ref,
+            due_date,
+            grace_period,
         )
     }
 
-    /// Lender only. Releases all or part of the locked quantity; a partial
-    /// release splits the receipt. Also allowed during RECOVERY if the
-    /// farmer repays before the sale completes (design doc §4.2, §5.5).
-    pub fn unlock(env: Env, receipt_id: u64, kg: u64) -> Result<(), Error> {
-        if !storage::has_receipt(&env, receipt_id) {
-            return Err(Error::ReceiptNotFound);
-        }
-        let lock = storage::get_lock(&env, receipt_id).ok_or(Error::InvalidStatus)?;
-        lock.lender.require_auth();
-
-        let _ = kg;
-        todo!(
-            "reject if status not in [Locked, Recovery]; split if partial; \
-             return released portion to Active; clear lock/recovery when fully released"
-        )
+    /// Releases `kg` from a `Locked` or `Recovery` receipt back to its owner.
+    /// Only the lender recorded in the lock may sign.
+    ///
+    /// A partial unlock splits: the released portion becomes a new `Active`
+    /// receipt, and the original keeps its id and stays `Locked` / in
+    /// `Recovery` under the same lock with the rest. Unlocking from
+    /// `Recovery` records the recovery as `Repaid` in `recovery_history`.
+    ///
+    /// Returns the id of the released receipt.
+    pub fn unlock(env: Env, receipt_id: u64, kg: u64) -> Result<u64, Error> {
+        lending::unlock(&env, receipt_id, kg)
     }
 
-    /// Lender only. Moves the due date later; cannot move it earlier
-    /// (design doc §4.2, §5.4).
-    pub fn extend_due(env: Env, receipt_id: u64, new_due: u64) -> Result<(), Error> {
-        if !storage::has_receipt(&env, receipt_id) {
-            return Err(Error::ReceiptNotFound);
-        }
-        let lock = storage::get_lock(&env, receipt_id).ok_or(Error::InvalidStatus)?;
-        lock.lender.require_auth();
-
-        let _ = new_due;
-        todo!("reject if new_due <= lock.due_date; update lock.due_date; emit events::due_extended")
+    /// Moves a `Locked` receipt's due date strictly later. Lender only.
+    pub fn extend_due(env: Env, receipt_id: u64, new_due_date: u64) -> Result<(), Error> {
+        lending::extend_due(&env, receipt_id, new_due_date)
     }
 
-    /// Lender only, after due date plus grace period. Sets status to
-    /// RECOVERY; nobody else can move it (design doc §1.2, §4.2, §5.5).
+    /// `Locked -> Recovery`, once the ledger time is strictly past
+    /// `due_date + grace_period`. Lender only.
     pub fn start_recovery(env: Env, receipt_id: u64) -> Result<(), Error> {
-        if !storage::has_receipt(&env, receipt_id) {
-            return Err(Error::ReceiptNotFound);
-        }
-        let lock = storage::get_lock(&env, receipt_id).ok_or(Error::InvalidStatus)?;
-        lock.lender.require_auth();
-
-        todo!(
-            "reject if env.ledger().timestamp() < lock.due_date + lock.grace_period \
-             (-> Error::RecoveryNotYetDue); set status Recovery; store Recovery::start_date; \
-             emit events::recovery_started"
-        )
+        lending::start_recovery(&env, receipt_id)
     }
 
-    /// Recovery operator AND lender. Called only after the escrow bank
-    /// confirms payment; transfers the receipt to the buyer (design doc
-    /// §1.2, §4.2, §5.5). `operator` is explicit because Soroban has no
-    /// implicit caller identity to check against a role registry.
+    /// Records the escrow sale of a receipt in `Recovery`. Requires **both** a
+    /// registered recovery operator and the recorded lender.
+    ///
+    /// `sale_ref` is the escrow deposit reference proving the buyer paid.
+    /// Ownership passes to `buyer`, the lock is cleared and the receipt is
+    /// `Active` again — the buyer then exits it (or pledges it) like any
+    /// other. The buyer does not sign: like the farmer at mint, they are the
+    /// beneficiary.
+    ///
+    /// Creates a canonical `Sale` record, appends a `Completed` recovery
+    /// pointing at it to `recovery_history`, and queues the sale for
+    /// `record_settlement`. Returns the `sale_id`.
     pub fn complete_recovery(
         env: Env,
         receipt_id: u64,
         operator: Address,
         buyer: Address,
         sale_ref: String,
+    ) -> Result<u64, Error> {
+        lending::complete_recovery(&env, receipt_id, operator, buyer, sale_ref)
+    }
+
+    /// Records the bank's settlement of a completed sale — the payout to the
+    /// lender and any surplus to the farmer. Requires **both** a registered
+    /// recovery operator and the sale's lender. Write-once.
+    pub fn record_settlement(
+        env: Env,
+        sale_id: u64,
+        operator: Address,
         settlement_ref: String,
     ) -> Result<(), Error> {
-        if !admin::is_recovery_operator(&env, &operator) {
-            return Err(Error::RecoveryOperatorNotRegistered);
-        }
-        operator.require_auth();
-        if !storage::has_receipt(&env, receipt_id) {
-            return Err(Error::ReceiptNotFound);
-        }
-        let lock = storage::get_lock(&env, receipt_id).ok_or(Error::InvalidStatus)?;
-        lock.lender.require_auth();
-
-        let _ = (buyer, sale_ref, settlement_ref);
-        todo!(
-            "reject if status != Recovery; set recovery.buyer/sale_ref/settlement_ref; \
-             transfer owner to buyer; emit events::recovery_completed"
-        )
+        lending::record_settlement(&env, sale_id, operator, settlement_ref)
     }
 
-    /// Custodian AND owner. Splits if partial, burns the exited portion and
-    /// records actual exit weight. Rejected if LOCKED or in RECOVERY
-    /// (design doc §4.2, §4.3, §5.6). `custodian` is explicit — exit can be
-    /// performed by any custodian registered for the receipt's warehouse,
-    /// not only the one who signed the original mint.
-    pub fn exit(
-        env: Env,
-        receipt_id: u64,
-        custodian: Address,
-        kg: u64,
-        exit_weight: u64,
-    ) -> Result<u64, Error> {
+    // --- reads -------------------------------------------------------------
+
+    /// `sha256(0x00 || XDR(leaf))`, the hash a leaf is anchored under. Free
+    /// to simulate, for anyone who would rather not encode the XDR.
+    pub fn leaf_hash(env: Env, leaf: Leaf) -> BytesN<32> {
+        anchor::leaf_hash(&env, &leaf)
+    }
+
+    /// Whether `leaf` is in the anchored root of `leaf.warehouse_id` for
+    /// `leaf.day`, by `proof`. Only while that day's root is on-chain (30
+    /// days); `false` after. Says nothing about whether the leaf could mint.
+    pub fn verify_leaf(env: Env, leaf: Leaf, proof: Vec<BytesN<32>>) -> bool {
+        anchor::verify_leaf(&env, &leaf, &proof)
+    }
+
+    /// A warehouse's last anchored day and head; `NoAnchor` before its first.
+    pub fn get_anchor(env: Env, warehouse_id: Symbol) -> Result<AnchorHead, Error> {
+        anchor::get_anchor(&env, &warehouse_id)
+    }
+
+    /// Whether `(warehouse_id, deposit_no)` is claimed, by a mint or a
+    /// pre-claim. A claimed number can never mint.
+    pub fn is_claimed(env: Env, warehouse_id: Symbol, deposit_no: u64) -> bool {
+        storage::is_claimed(&env, &warehouse_id, deposit_no)
+    }
+
+    /// The live pledge on a `Locked` or `Recovery` receipt; `NotLocked`
+    /// otherwise.
+    pub fn get_lock(env: Env, receipt_id: u64) -> Result<Lock, Error> {
         let receipt = storage::get_receipt(&env, receipt_id).ok_or(Error::ReceiptNotFound)?;
-        if !admin::is_custodian(&env, &receipt.warehouse_id, &custodian) {
-            return Err(Error::CustodianNotRegistered);
-        }
-        custodian.require_auth();
-        receipt.owner.require_auth();
-
-        if matches!(receipt.status, Status::Locked | Status::Recovery) {
-            return Err(Error::InvalidStatus);
-        }
-
-        let _ = (kg, exit_weight);
-        todo!(
-            "split if kg < weight_kg; burn exited portion; set status Exited on the \
-             fully-exited receipt; record exit_date/exit_weight_kg; emit events::exited"
-        )
+        lending::current_lock(&receipt)
     }
 
-    /// Admin multisig only. Used for proven fraudulent mints (design doc
-    /// §1.2, §9).
-    pub fn revoke(env: Env, receipt_id: u64, reason: String) -> Result<(), Error> {
-        admin::require_admin(&env)?;
-        if !storage::has_receipt(&env, receipt_id) {
-            return Err(Error::ReceiptNotFound);
-        }
-
-        let _ = reason;
-        todo!("set status Revoked regardless of current status; emit events::revoked")
+    /// Whether `lock` would accept this receipt on status and weight source.
+    pub fn is_pledgeable(env: Env, receipt_id: u64) -> Result<bool, Error> {
+        let receipt = storage::get_receipt(&env, receipt_id).ok_or(Error::ReceiptNotFound)?;
+        Ok(lending::is_pledgeable(&receipt))
     }
 
-    /// Callable by anyone; keeps active receipts from being archived
-    /// (design doc §1.2, §7.2). No auth required by design.
-    pub fn extend_ttl(env: Env, receipt_id: u64) -> Result<(), Error> {
-        if !storage::has_receipt(&env, receipt_id) {
-            return Err(Error::ReceiptNotFound);
-        }
-
-        todo!("storage::bump_receipt(&env, receipt_id); emit events::ttl_extended")
+    /// One page of receipts ever pledged to `lender`, 64 per page. Includes
+    /// released and recovered records; filter on `status` and `lock` for
+    /// live collateral.
+    pub fn get_receipts_by_lender(env: Env, lender: Address, page: u32) -> Vec<Receipt> {
+        let ids = storage::lender_page(&env, &lender, page);
+        Self::collect(&env, ids)
     }
 
-    // --- Admin registry functions (design doc §1.2) -----------------------
+    /// Number of pages `get_receipts_by_lender` will serve.
+    pub fn lender_page_count(env: Env, lender: Address) -> u32 {
+        storage::lender_pages(&env, &lender)
+    }
+
+    pub fn get_sale(env: Env, sale_id: u64) -> Result<Sale, Error> {
+        storage::get_sale(&env, sale_id).ok_or(Error::SaleNotFound)
+    }
+
+    /// One page of every sale from a recovery `lender` started, settled or
+    /// not, oldest first, 64 per page.
+    pub fn get_sales_by_lender(env: Env, lender: Address, page: u32) -> Vec<Sale> {
+        let mut out = Vec::new(&env);
+        for sale_id in storage::lender_sale_page(&env, &lender, page).iter() {
+            if let Some(sale) = storage::get_sale(&env, sale_id) {
+                out.push_back(sale);
+            }
+        }
+        out
+    }
+
+    /// Number of pages `get_sales_by_lender` will serve.
+    pub fn lender_sale_page_count(env: Env, lender: Address) -> u32 {
+        storage::lender_sale_pages(&env, &lender)
+    }
+
+    /// Completed recoveries still waiting for `record_settlement`, oldest
+    /// first, 64 per page.
+    pub fn get_unsettled_sales(env: Env, page: u32) -> Vec<Sale> {
+        let ids = storage::unsettled_sales(&env);
+        let start = page.saturating_mul(storage::INDEX_PAGE_SIZE);
+        let end = start
+            .saturating_add(storage::INDEX_PAGE_SIZE)
+            .min(ids.len());
+        let mut out = Vec::new(&env);
+        for i in start..end {
+            if let Some(sale) = storage::get_sale(&env, ids.get_unchecked(i)) {
+                out.push_back(sale);
+            }
+        }
+        out
+    }
+
+    /// Number of sales awaiting settlement.
+    pub fn unsettled_sale_count(env: Env) -> u32 {
+        storage::unsettled_sales(&env).len()
+    }
+
+    pub fn get_receipt(env: Env, receipt_id: u64) -> Result<Receipt, Error> {
+        storage::get_receipt(&env, receipt_id).ok_or(Error::ReceiptNotFound)
+    }
+
+    /// The `data_version` this build stamps on every record it writes. A
+    /// record whose own `data_version` is lower was written by an older
+    /// layout; see `docs/upgrade.md`.
+    pub fn data_version(_env: Env) -> u32 {
+        DATA_VERSION
+    }
+
+    /// One page of an owner's receipts, newest last, 64 per page.
+    ///
+    /// Paged because an unpaged read would blow the network's per-transaction
+    /// ledger-read limit (200 entries) once a farmer has a few hundred
+    /// receipts. Includes `Exited` and `Revoked` records — filter on
+    /// `status` for live holdings. Those may be archived (see
+    /// `extend_ttl_batch`); reading one restores it, at the caller's cost. A receipt sold
+    /// in recovery stays listed under its previous owner too, so also filter
+    /// on `owner`.
+    pub fn get_receipts_by_owner(env: Env, owner: Address, page: u32) -> Vec<Receipt> {
+        let ids = storage::owner_page(&env, &owner, page);
+        Self::collect(&env, ids)
+    }
+
+    /// One page of a warehouse's receipts, newest last, 64 per page.
+    pub fn get_receipts_by_warehouse(env: Env, warehouse_id: Symbol, page: u32) -> Vec<Receipt> {
+        let ids = storage::warehouse_page(&env, &warehouse_id, page);
+        Self::collect(&env, ids)
+    }
+
+    /// Number of pages `get_receipts_by_owner` will serve for `owner`.
+    pub fn owner_page_count(env: Env, owner: Address) -> u32 {
+        storage::owner_pages(&env, &owner)
+    }
+
+    /// Number of pages `get_receipts_by_warehouse` will serve.
+    pub fn warehouse_page_count(env: Env, warehouse_id: Symbol) -> u32 {
+        storage::warehouse_pages(&env, &warehouse_id)
+    }
+
+    // --- registries (admin only) -------------------------------------------
+
+    pub fn add_warehouse(env: Env, warehouse_id: Symbol) -> Result<(), Error> {
+        admin::add_warehouse(&env, warehouse_id)
+    }
+
+    pub fn remove_warehouse(env: Env, warehouse_id: Symbol) -> Result<(), Error> {
+        admin::remove_warehouse(&env, warehouse_id)
+    }
 
     pub fn add_custodian(env: Env, warehouse_id: Symbol, custodian: Address) -> Result<(), Error> {
         admin::add_custodian(&env, warehouse_id, custodian)
@@ -274,11 +581,28 @@ impl ReceiptContract {
         admin::remove_verifier(&env, verifier)
     }
 
+    /// Recovery operators co-sign `complete_recovery`.
     pub fn add_recovery_operator(env: Env, operator: Address) -> Result<(), Error> {
         admin::add_recovery_operator(&env, operator)
     }
 
     pub fn remove_recovery_operator(env: Env, operator: Address) -> Result<(), Error> {
         admin::remove_recovery_operator(&env, operator)
+    }
+}
+
+impl ReceiptContract {
+    /// Receipt ids are only ever indexed alongside their receipt, so every
+    /// id resolves. An *archived* receipt does not read as missing either: it
+    /// is restored as part of the call (see `docs/archival.md`). The `if let`
+    /// is defensive, not a recovery path.
+    fn collect(env: &Env, ids: Vec<u64>) -> Vec<Receipt> {
+        let mut out = Vec::new(env);
+        for id in ids.iter() {
+            if let Some(receipt) = storage::get_receipt(env, id) {
+                out.push_back(receipt);
+            }
+        }
+        out
     }
 }

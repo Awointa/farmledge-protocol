@@ -1,0 +1,41 @@
+{
+  "Receipt \u2014 Active, freshly minted": {
+    "bytes": 432,
+    "live_until": 8043222,
+    "at_ledger": 5019223
+  },
+  "DepositIndex": {
+    "bytes": 124,
+    "live_until": 8043222,
+    "at_ledger": 5019224
+  },
+  "Receipt \u2014 Locked": {
+    "bytes": 528,
+    "live_until": 8043222,
+    "at_ledger": 5019242
+  },
+  "Receipt \u2014 Active, reduced in place by a split": {
+    "bytes": 432,
+    "live_until": 8043229,
+    "at_ledger": 5019244
+  },
+  "OwnerIndex page 0": {
+    "bytes": 800,
+    "live_until": 8033145,
+    "at_ledger": 5019374
+  },
+  "Receipt \u2014 after a completed recovery": {
+    "bytes": 652,
+    "live_until": 8043222,
+    "at_ledger": 5019414
+  },
+  "Sale \u2014 settled": {
+    "bytes": 416,
+    "live_until": 8043413,
+    "at_ledger": 5019434
+  },
+  "Receipt \u2014 Exited, split off": {
+    "bytes": 456,
+    "note": "receipt 6, read back after the run"
+  }
+}

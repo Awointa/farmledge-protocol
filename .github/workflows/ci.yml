@@ -2,39 +2,75 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  # Must be >= the soroban-sdk major (28) — the SDK refuses to build a
+  # contract under an older CLI, and an older CLI cannot read a protocol-28
+  # network's settings.
+  STELLAR_CLI_VERSION: 28.1.0
 
 jobs:
-  build-test:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      # Installs exactly what rust-toolchain.toml pins — channel, wasm target,
+      # rustfmt and clippy. (A separate toolchain action would add components
+      # to `stable`, which the pinned file then overrides.)
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32v1-none
-          components: clippy, rustfmt
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
+      # The prebuilt release binary, not `cargo install`: building from source
+      # needs libdbus headers the runner lacks and costs ~15 minutes.
       - name: Install stellar-cli
-        run: cargo install --locked stellar-cli --version 28.0.0
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "v${STELLAR_CLI_VERSION}" --repo stellar/stellar-cli \
+            --pattern "stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            --output - | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/stellar" --version
 
-      - name: cargo fmt --check
-        run: cargo fmt --all -- --check
+      - name: Format
+        run: cargo fmt --all --check
 
-      # Not -D warnings yet: many functions are still TODO-stubbed (see
-      # README "Current state"), which legitimately trips dead_code and
-      # unused-variable lints until each is implemented.
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: cargo test
+      # docs/upgrade.md: no entry point may replace the contract's Wasm.
+      - name: Contract is immutable
+        run: make check-immutable
+
+      - name: Test
         run: cargo test --workspace
 
-      - name: stellar contract build
+      - name: Build contract
         run: stellar contract build
+
+      # A contract over the network's 128KB limit cannot be deployed at all,
+      # so failing here beats failing at deploy time.
+      - name: Check wasm size
+        run: |
+          wasm=target/wasm32v1-none/release/farmledge_receipt.wasm
+          size=$(stat -c%s "$wasm")
+          echo "$wasm is $size bytes"
+          if [ "$size" -gt 131072 ]; then
+            echo "::error::wasm exceeds the 128KB contract size limit"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: farmledge-receipt-wasm
+          path: target/wasm32v1-none/release/farmledge_receipt.wasm
