@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, String, Symbol, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, String, Symbol, Vec};
 
 /// Layout version of every `Receipt` and `Sale` this build writes.
 ///
@@ -10,7 +10,9 @@ use soroban_sdk::{contracttype, Address, String, Symbol, Vec};
 ///
 /// - 1: named-field maps (the first Testnet deployment).
 /// - 2: the positional layout in `layout.rs`; splits divide in place.
-pub const DATA_VERSION: u32 = 2;
+/// - 3: receipts are minted on demand from an anchored balance leaf and
+///   carry its `deposit_no`; see `anchor.rs`.
+pub const DATA_VERSION: u32 = 3;
 
 /// How a receipt's weight was determined.
 ///
@@ -195,10 +197,13 @@ pub struct Receipt {
     pub data_version: u32,
     /// Contract-assigned, auto-incrementing. Distinct from `deposit_id`.
     pub receipt_id: u64,
-    /// Client-generated intake reference. Unique across mints; a receipt
-    /// split off another inherits its parent's, since they are the same
-    /// physical deposit.
+    /// The lot's human intake reference, from the leaf it was minted from.
+    /// A receipt split off another inherits its parent's, since they are the
+    /// same physical deposit.
     pub deposit_id: String,
+    /// The lot's per-warehouse number: its identity in the anchored books,
+    /// and the key of the duplicate guard. Inherited by every split.
+    pub deposit_no: u64,
     /// The receipt this one was split off, `None` on a minted receipt. The
     /// parent itself lives on with the remaining weight.
     pub parent_id: Option<u64>,
@@ -240,4 +245,62 @@ pub enum Index {
     Warehouse(Symbol),
     Lender(Address),
     LenderSales(Address),
+}
+
+/// One leaf of a warehouse's daily tree, as the backend builds it and the
+/// farmer holds it. Hashed as `sha256(0x00 || XDR(leaf))`; see
+/// `docs/storage-strategy.md` ("Leaf format") and `docs/events.md`
+/// ("Farmer proofs").
+///
+/// **Its layout is part of the proof format**: every proof ever handed to a
+/// farmer is checked against it. Never change a field; a new layout is a new
+/// `version`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Leaf {
+    /// `LEAF_VERSION`.
+    pub version: u32,
+    /// 0 deposit, 1 dispatch, 2 end-of-day balance. Only a balance mints.
+    pub kind: u32,
+    pub warehouse_id: Symbol,
+    /// UTC days since 1970-01-01: the day whose tree this leaf is in.
+    pub day: u32,
+    /// The leaf's position in that tree. A position, never an identity.
+    pub index: u32,
+    /// The lot's identity: assigned once at intake, never reused.
+    pub deposit_no: u64,
+    pub deposit_id: String,
+    /// The receipt that governs the lot, or 0 if none.
+    pub receipt_id: u64,
+    /// The `data_version` of the contract `receipt_id` belongs to, or 0.
+    pub receipt_version: u32,
+    pub owner: Address,
+    pub commodity: Symbol,
+    pub grade: Symbol,
+    /// Deposited, dispatched or remaining, by `kind`.
+    pub kg: u64,
+    pub weight_source: WeightSource,
+    pub bags: u32,
+    /// Basis points of a percent, as `Receipt::moisture_pct`.
+    pub moisture_bps: u32,
+    /// Who attested the intake.
+    pub custodian: Address,
+    /// Who countersigned the intake.
+    pub verifier: Address,
+    /// When the lot was taken in (Unix seconds). The same on every leaf of
+    /// the lot.
+    pub deposited_at: u64,
+    /// When this leaf's event happened; the day's cutoff for a balance.
+    pub at: u64,
+    /// Random, per leaf, so a leaf hash reveals nothing to anyone without it.
+    pub salt: BytesN<32>,
+}
+
+/// A warehouse's latest anchor: the last day anchored, and the hash chain's
+/// head after it.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnchorHead {
+    pub day: u32,
+    pub head: BytesN<32>,
 }

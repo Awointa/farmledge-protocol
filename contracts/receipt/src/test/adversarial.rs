@@ -428,33 +428,31 @@ fn refs_longer_than_the_cap_are_rejected_and_change_nothing() {
     );
 }
 
-/// `deposit_id` is capped like the lending refs. A registered custodian
-/// supplies it, but in Phase 1 custodian keys are held by the backend, so
-/// registration alone does not bound it. An over-long one mints nothing.
+/// `deposit_id` is capped like the lending refs. It comes from the anchored
+/// leaf, which the backend builds, and in Phase 1 the backend also holds the
+/// custodian and verifier keys, so registration alone does not bound it. An
+/// over-long one mints nothing.
 #[test]
 fn a_deposit_id_longer_than_the_cap_is_rejected_and_mints_nothing() {
     let env = Env::default();
     let l = setup_lending(&env);
     let max = crate::MAX_REF_LEN as usize;
-    let mint = |deposit: &String| {
-        l.f.client.try_mint(
-            &l.f.custodian,
-            &l.f.verifier,
-            deposit,
-            &l.f.farmer,
-            &l.f.warehouse,
-            &soroban_sdk::Symbol::new(&env, super::COMMODITY),
-            &soroban_sdk::Symbol::new(&env, super::GRADE),
-            &2_000,
-            &crate::WeightSource::Scale,
-            &20,
-            &super::MOISTURE,
-        )
+    let long = "D".repeat(max + 1);
+    let fits = "D".repeat(max);
+    let mut day = [
+        l.f.balance_leaf(&env, &long, 2_000, 20, crate::WeightSource::Scale),
+        l.f.balance_leaf(&env, &fits, 2_000, 20, crate::WeightSource::Scale),
+    ];
+    let proofs = l.f.anchor_next_day(&env, &mut day);
+    let mint = |i: usize| {
+        l.f.client
+            .try_mint_from_anchor(&l.f.custodian, &l.f.verifier, &day[i], &proofs[i])
     };
 
-    assert_eq!(mint(&text(&env, max + 1)), Err(Ok(Error::RefTooLong)));
+    assert_eq!(mint(0), Err(Ok(Error::RefTooLong)));
     assert_eq!(l.f.client.owner_page_count(&l.f.farmer), 0);
     assert_eq!(next_id(&l.f), 1, "no receipt id was allocated");
+    assert!(!l.f.client.is_claimed(&l.f.warehouse, &day[0].deposit_no));
 
-    assert_eq!(mint(&text(&env, max)), Ok(Ok(1)));
+    assert_eq!(mint(1), Ok(Ok(1)));
 }

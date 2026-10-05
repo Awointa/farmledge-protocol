@@ -17,6 +17,8 @@ pub enum Error {
 
     // --- receipts ---
     ReceiptNotFound = 10,
+    /// The lot's `(warehouse_id, deposit_no)` is already claimed, by a mint
+    /// or a pre-claim.
     DuplicateDepositId = 11,
     /// The receipt is not in a status this operation accepts.
     InvalidStatus = 12,
@@ -62,6 +64,28 @@ pub enum Error {
     RefTooLong = 38,
 
     // --- operations ---
-    /// A batched keep-alive call named more entries than `MAX_TTL_BATCH`.
+    /// A batched call named more entries than `MAX_TTL_BATCH`.
     BatchTooLarge = 40,
+
+    // --- anchoring and minting on demand ---
+    /// Only a balance leaf (kind 2) can mint: a deposit or dispatch leaf
+    /// records a movement, not what the lot holds now.
+    WrongLeafKind = 50,
+    /// The leaf is not from the warehouse's latest anchored day.
+    StaleLeaf = 51,
+    /// The proof does not fold to the anchored root, has the wrong length
+    /// for that day's tree, or names a position outside it.
+    InvalidProof = 52,
+    /// The warehouse has never been anchored, or the day's root has expired.
+    NoAnchor = 53,
+    /// `anchor` for a day at or before the warehouse's last anchored day.
+    AnchorOutOfOrder = 54,
+    /// `anchor` for a day after the ledger's current UTC day.
+    AnchorInFuture = 55,
+    /// `anchor` with no leaves, or more than `2^MAX_TREE_DEPTH`.
+    InvalidLeafCount = 56,
+    /// The leaf says the lot is already governed by a receipt.
+    LeafHasReceipt = 57,
+    /// A leaf `version` this contract does not know.
+    UnsupportedLeafVersion = 58,
 }

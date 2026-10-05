@@ -102,7 +102,8 @@ pub fn split_receipt(env: &Env, parent: &Receipt, kg: u64) -> Result<SplitParts,
 }
 
 /// The new receipt inherits everything identifying about the deposit —
-/// including `deposit_id`, since it is the same physical intake — and
+/// including `deposit_id` and `deposit_no`, since it is the same physical
+/// intake — and
 /// carries the parent's status and lock/recovery state forward. Only
 /// identity, quantity and lineage differ.
 fn child_of(env: &Env, parent: &Receipt, weight_kg: u64, bag_count: u32) -> Receipt {
@@ -110,6 +111,7 @@ fn child_of(env: &Env, parent: &Receipt, weight_kg: u64, bag_count: u32) -> Rece
         data_version: DATA_VERSION,
         receipt_id: storage::next_receipt_id(env),
         deposit_id: parent.deposit_id.clone(),
+        deposit_no: parent.deposit_no,
         parent_id: Some(parent.receipt_id),
         commodity: parent.commodity.clone(),
         grade: parent.grade.clone(),

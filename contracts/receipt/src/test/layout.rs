@@ -33,7 +33,7 @@ fn a_receipt_is_stored_without_field_names_or_its_own_id() {
             .unwrap();
         raw.len()
     });
-    assert_eq!(fields, 20, "positional: one element per field, no id");
+    assert_eq!(fields, 21, "positional: one element per field, no id");
     let bytes = stored_bytes(&env, &f.contract_id, &DataKey::Receipt(id));
     // 316 bytes when written; it was 816 as a named-field map.
     assert!(

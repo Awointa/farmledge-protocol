@@ -4,11 +4,14 @@
 //! One contract for all commodities — commodity is a field on the receipt,
 //! not a separate deployment.
 //!
-//! Covers the deposit-to-exit lifecycle (`mint`, `exit`, `revoke`,
-//! `extend_ttl`, `extend_ttl_batch`, `extend_index_ttl`) and the lending lifecycle (`lock`, `unlock`, `extend_due`,
-//! `start_recovery`, `complete_recovery`, `record_settlement`). The legal status transitions are
-//! listed on [`Status`]. There is deliberately no user-to-user transfer, and
-//! no fees, pricing or settlement on-chain.
+//! Covers daily anchoring of each warehouse's books (`anchor`), minting on
+//! demand from them (`mint_from_anchor`, `preclaim`), the deposit-to-exit
+//! lifecycle (`exit`, `revoke`, `extend_ttl`, `extend_ttl_batch`,
+//! `extend_index_ttl`) and the lending lifecycle (`lock`, `unlock`,
+//! `extend_due`, `start_recovery`, `complete_recovery`,
+//! `record_settlement`). The legal status transitions are listed on
+//! [`Status`]. There is deliberately no user-to-user transfer, and no fees,
+//! pricing or settlement on-chain.
 //!
 //! The contract is **immutable**: there is no entry point that replaces its
 //! Wasm. Changes ship as a new deployment; see `docs/upgrade.md`.
@@ -20,6 +23,7 @@
 //! it, not that it is allowed to do anything.
 
 mod admin;
+mod anchor;
 mod errors;
 mod events;
 mod layout;
@@ -33,13 +37,14 @@ extern crate std;
 #[cfg(test)]
 mod test;
 
-use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Symbol, Vec};
 
+pub use anchor::{KIND_BALANCE, KIND_DEPOSIT, KIND_DISPATCH, LEAF_VERSION, MAX_TREE_DEPTH};
 pub use errors::Error;
 pub use lending::MAX_REF_LEN;
 pub use types::{
-    Index, Lock, MaybeLock, MaybeRecovery, Receipt, Recovery, RecoveryResolution, Sale, Status,
-    WeightSource, DATA_VERSION,
+    AnchorHead, Index, Leaf, Lock, MaybeLock, MaybeRecovery, Receipt, Recovery,
+    RecoveryResolution, Sale, Status, WeightSource, DATA_VERSION,
 };
 
 /// Upper bound on `moisture_pct`, in basis points of a percent (100.00%).
@@ -71,111 +76,53 @@ impl ReceiptContract {
 
     // --- lifecycle ---------------------------------------------------------
 
-    /// Issues a receipt for a deposit. Requires **both** the custodian's and
-    /// the verifier's authorisation: one party weighs and receives the grain,
-    /// a second independently attests to it.
+    /// Commits one day of a warehouse's books: the Merkle `root` over its
+    /// `leaves` deposit, dispatch and balance leaves for UTC `day`. Signed by
+    /// a custodian registered for the warehouse.
     ///
-    /// The custodian must be registered for this specific warehouse. The
-    /// farmer does not sign — they are the beneficiary, not an attester.
+    /// Days are strictly increasing per warehouse and never after the
+    /// ledger's current day, so a day can never be replaced. The head moves
+    /// to `sha256(prev_head || day || leaves || root)` and is returned; the
+    /// root is kept on-chain for 30 days, for minting, and in the `Anchored`
+    /// event for good.
+    pub fn anchor(
+        env: Env,
+        custodian: Address,
+        warehouse_id: Symbol,
+        day: u32,
+        root: BytesN<32>,
+        leaves: u32,
+    ) -> Result<BytesN<32>, Error> {
+        anchor::anchor(&env, custodian, warehouse_id, day, root, leaves)
+    }
+
+    /// Issues a receipt for a lot, from its balance leaf in the warehouse's
+    /// latest anchored day and the leaf's inclusion `proof`. Requires
+    /// **both** a custodian registered for the leaf's warehouse and a
+    /// registered verifier, attesting the lot as it is now.
+    ///
+    /// Every field of the receipt is taken from the proven leaf, and each
+    /// `(warehouse_id, deposit_no)` mints at most once, ever. The farmer
+    /// does not sign: they are the beneficiary, not an attester.
     ///
     /// Returns the new `receipt_id`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn mint(
+    pub fn mint_from_anchor(
         env: Env,
         custodian: Address,
         verifier: Address,
-        deposit_id: String,
-        farmer: Address,
-        warehouse_id: Symbol,
-        commodity: Symbol,
-        grade: Symbol,
-        weight_kg: u64,
-        weight_source: WeightSource,
-        bag_count: u32,
-        moisture_pct: u32,
+        leaf: Leaf,
+        proof: Vec<BytesN<32>>,
     ) -> Result<u64, Error> {
-        // Both signatures first, so neither can be skipped by tripping a
-        // later validation error.
-        custodian.require_auth();
-        verifier.require_auth();
+        anchor::mint_from_anchor(&env, custodian, verifier, leaf, proof)
+    }
 
-        if !admin::is_warehouse(&env, &warehouse_id) {
-            return Err(Error::WarehouseNotRegistered);
-        }
-        if !admin::is_custodian(&env, &warehouse_id, &custodian) {
-            return Err(Error::CustodianNotRegistered);
-        }
-        if !admin::is_verifier(&env, &verifier) {
-            return Err(Error::VerifierNotRegistered);
-        }
-
-        if weight_kg == 0 {
-            return Err(Error::InvalidWeight);
-        }
-        // A bag-estimated weight with no bags is not an estimate of anything.
-        if weight_source == WeightSource::BagEstimate && bag_count == 0 {
-            return Err(Error::InvalidWeight);
-        }
-        if moisture_pct > MAX_MOISTURE_BPS {
-            return Err(Error::InvalidMoisture);
-        }
-        // Capped like the lending refs: it is stored in the receipt, copied
-        // onto every receipt split off, and is the deposit guard's key.
-        if deposit_id.len() > MAX_REF_LEN {
-            return Err(Error::RefTooLong);
-        }
-        if storage::has_deposit_id(&env, &deposit_id) {
-            return Err(Error::DuplicateDepositId);
-        }
-
-        let receipt_id = storage::next_receipt_id(&env);
-        let receipt = Receipt {
-            data_version: DATA_VERSION,
-            receipt_id,
-            deposit_id: deposit_id.clone(),
-            parent_id: None,
-            commodity,
-            grade,
-            weight_kg,
-            weight_source,
-            bag_count,
-            moisture_pct,
-            warehouse_id: warehouse_id.clone(),
-            custodian,
-            verifier,
-            owner: farmer.clone(),
-            status: Status::Active,
-            lock: MaybeLock::None,
-            recovery: MaybeRecovery::None,
-            recovery_history: Vec::new(&env),
-            deposit_date: env.ledger().timestamp(),
-            exit_date: None,
-            exit_weight_kg: None,
-        };
-
-        storage::set_receipt(&env, &receipt);
-        storage::set_deposit_index(&env, &deposit_id, receipt_id);
-        storage::index_owner(&env, &farmer, receipt_id);
-        storage::index_warehouse(&env, &warehouse_id, receipt_id);
-        storage::bump_instance(&env);
-
-        events::Minted {
-            receipt_id,
-            warehouse_id: receipt.warehouse_id,
-            deposit_id: receipt.deposit_id,
-            owner: receipt.owner,
-            commodity: receipt.commodity,
-            grade: receipt.grade,
-            weight_kg: receipt.weight_kg,
-            weight_source: receipt.weight_source,
-            bag_count: receipt.bag_count,
-            moisture_pct: receipt.moisture_pct,
-            custodian: receipt.custodian,
-            verifier: receipt.verifier,
-            deposit_date: receipt.deposit_date,
-        }
-        .publish(&env);
-        Ok(receipt_id)
+    /// Claims deposit numbers so they can never be minted: the lots held as
+    /// receipts on an earlier contract, at cutover. Admin only, at most
+    /// `MAX_TTL_BATCH` numbers a call, all-or-nothing: a number already
+    /// claimed fails the call. One `Preclaimed` event per number publishes
+    /// the list. There is deliberately no way to undo a claim.
+    pub fn preclaim(env: Env, warehouse_id: Symbol, deposit_nos: Vec<u64>) -> Result<u32, Error> {
+        anchor::preclaim(&env, warehouse_id, deposit_nos)
     }
 
     /// Releases grain from the warehouse. Requires **both** a custodian
@@ -288,11 +235,10 @@ impl ReceiptContract {
     /// indexer's event archive. Reading it later still works; the read
     /// restores it.
     ///
-    /// Also bumps the receipt's `deposit_id` guard entry, keeping the
-    /// duplicate-mint protection alive alongside the receipt it protects, any
-    /// `Sale` records its recovery history refers to, the unsettled-sales
-    /// list and the contract instance. Index pages are kept alive separately
-    /// by `extend_index_ttl`.
+    /// Also bumps any `Sale` records its recovery history refers to, the
+    /// unsettled-sales list and the contract instance. Index pages are kept
+    /// alive separately by `extend_index_ttl`. The duplicate guard needs no
+    /// keep-alive: an archived claim chunk is restored when a mint reads it.
     pub fn extend_ttl(env: Env, receipt_id: u64) -> Result<(), Error> {
         Self::extend_ttl_batch(env.clone(), Vec::from_array(&env, [receipt_id])).map(|_| ())
     }
@@ -321,7 +267,6 @@ impl ReceiptContract {
             }
 
             storage::bump_receipt(&env, receipt_id);
-            storage::bump_deposit_index(&env, &receipt.deposit_id);
             // Sale records live in their own entries; keep any this receipt's
             // history points at alive alongside it.
             for recovery in receipt.recovery_history.iter() {
@@ -471,6 +416,30 @@ impl ReceiptContract {
     }
 
     // --- reads -------------------------------------------------------------
+
+    /// `sha256(0x00 || XDR(leaf))`, the hash a leaf is anchored under. Free
+    /// to simulate, for anyone who would rather not encode the XDR.
+    pub fn leaf_hash(env: Env, leaf: Leaf) -> BytesN<32> {
+        anchor::leaf_hash(&env, &leaf)
+    }
+
+    /// Whether `leaf` is in the anchored root of `leaf.warehouse_id` for
+    /// `leaf.day`, by `proof`. Only while that day's root is on-chain (30
+    /// days); `false` after. Says nothing about whether the leaf could mint.
+    pub fn verify_leaf(env: Env, leaf: Leaf, proof: Vec<BytesN<32>>) -> bool {
+        anchor::verify_leaf(&env, &leaf, &proof)
+    }
+
+    /// A warehouse's last anchored day and head; `NoAnchor` before its first.
+    pub fn get_anchor(env: Env, warehouse_id: Symbol) -> Result<AnchorHead, Error> {
+        anchor::get_anchor(&env, &warehouse_id)
+    }
+
+    /// Whether `(warehouse_id, deposit_no)` is claimed, by a mint or a
+    /// pre-claim. A claimed number can never mint.
+    pub fn is_claimed(env: Env, warehouse_id: Symbol, deposit_no: u64) -> bool {
+        storage::is_claimed(&env, &warehouse_id, deposit_no)
+    }
 
     /// The live pledge on a `Locked` or `Recovery` receipt; `NotLocked`
     /// otherwise.

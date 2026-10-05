@@ -1,10 +1,14 @@
+//! `mint_from_anchor`: who may mint, what it validates, what it writes.
+//! The checks the audit of A+B depends on have their own named tests in
+//! `audit.rs`.
+
 use soroban_sdk::{
     testutils::{Address as _, MockAuth, MockAuthInvoke},
-    Address, Env, IntoVal, String, Symbol,
+    Address, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
 
-use super::{setup, setup_bare, COMMODITY, GRADE, MOISTURE, WAREHOUSE};
-use crate::{Error, MaybeLock, MaybeRecovery, Status, WeightSource};
+use super::{setup, setup_bare, Fixture, MOISTURE, NOW, WAREHOUSE};
+use crate::{Error, Leaf, MaybeLock, MaybeRecovery, Status, WeightSource};
 
 #[test]
 fn mint_creates_an_active_receipt() {
@@ -24,6 +28,9 @@ fn mint_creates_an_active_receipt() {
     assert_eq!(r.verifier, f.verifier);
     assert_eq!(r.moisture_pct, MOISTURE);
     assert_eq!(r.parent_id, None);
+    assert_eq!(r.deposit_no, 1);
+    assert_eq!(r.deposit_date, NOW);
+    assert_eq!(r.data_version, 3);
     assert_eq!(r.exit_date, None);
     assert_eq!(r.exit_weight_kg, None);
     // Lending state exists on the receipt from day one, always empty here.
@@ -86,26 +93,23 @@ fn owner_index_pages_roll_over_at_64() {
 
 // --- authorisation ---------------------------------------------------------
 
-/// Builds the exact mint invocation, so a `MockAuth` can be scoped to it.
-fn mint_args(
-    env: &Env,
-    f: &super::Fixture,
-    deposit_id: &str,
-) -> soroban_sdk::Vec<soroban_sdk::Val> {
-    (
-        f.custodian.clone(),
-        f.verifier.clone(),
-        String::from_str(env, deposit_id),
-        f.farmer.clone(),
-        f.warehouse.clone(),
-        Symbol::new(env, COMMODITY),
-        Symbol::new(env, GRADE),
-        2_000u64,
-        WeightSource::Scale,
-        20u32,
-        MOISTURE,
-    )
-        .into_val(env)
+/// One lot anchored as the next day; returns its leaf and proof.
+fn anchored(env: &Env, f: &Fixture, deposit_id: &str) -> (Leaf, Vec<BytesN<32>>) {
+    let mut day = [f.balance_leaf(env, deposit_id, 2_000, 20, WeightSource::Scale)];
+    let proofs = f.anchor_next_day(env, &mut day);
+    (day[0].clone(), proofs[0].clone())
+}
+
+fn mint_auth<'a>(
+    f: &'a Fixture,
+    args: &'a soroban_sdk::Vec<soroban_sdk::Val>,
+) -> MockAuthInvoke<'a> {
+    MockAuthInvoke {
+        contract: &f.contract_id,
+        fn_name: "mint_from_anchor",
+        args: args.clone(),
+        sub_invokes: &[],
+    }
 }
 
 /// Only the custodian signs. The verifier's `require_auth()` must trap, so a
@@ -114,34 +118,12 @@ fn mint_args(
 fn mint_fails_with_only_the_custodian_signature() {
     let env = Env::default();
     let f = setup(&env);
-    let args = mint_args(&env, &f, "DEP-SOLO-C");
+    let (leaf, proof) = anchored(&env, &f, "DEP-SOLO-C");
+    let args = (f.custodian.clone(), f.verifier.clone(), leaf.clone(), proof.clone()).into_val(&env);
+    let invoke = mint_auth(&f, &args);
 
-    env.mock_auths(&[MockAuth {
-        address: &f.custodian,
-        invoke: &MockAuthInvoke {
-            contract: &f.contract_id,
-            fn_name: "mint",
-            args: args.clone(),
-            sub_invokes: &[],
-        },
-    }]);
-
-    assert!(f
-        .client
-        .try_mint(
-            &f.custodian,
-            &f.verifier,
-            &String::from_str(&env, "DEP-SOLO-C"),
-            &f.farmer,
-            &f.warehouse,
-            &Symbol::new(&env, COMMODITY),
-            &Symbol::new(&env, GRADE),
-            &2_000u64,
-            &WeightSource::Scale,
-            &20u32,
-            &MOISTURE,
-        )
-        .is_err());
+    env.mock_auths(&[MockAuth { address: &f.custodian, invoke: &invoke }]);
+    assert!(f.client.try_mint_from_anchor(&f.custodian, &f.verifier, &leaf, &proof).is_err());
 }
 
 /// Only the verifier signs. The custodian's `require_auth()` must trap.
@@ -149,107 +131,47 @@ fn mint_fails_with_only_the_custodian_signature() {
 fn mint_fails_with_only_the_verifier_signature() {
     let env = Env::default();
     let f = setup(&env);
-    let args = mint_args(&env, &f, "DEP-SOLO-V");
+    let (leaf, proof) = anchored(&env, &f, "DEP-SOLO-V");
+    let args = (f.custodian.clone(), f.verifier.clone(), leaf.clone(), proof.clone()).into_val(&env);
+    let invoke = mint_auth(&f, &args);
 
-    env.mock_auths(&[MockAuth {
-        address: &f.verifier,
-        invoke: &MockAuthInvoke {
-            contract: &f.contract_id,
-            fn_name: "mint",
-            args,
-            sub_invokes: &[],
-        },
-    }]);
-
-    assert!(f
-        .client
-        .try_mint(
-            &f.custodian,
-            &f.verifier,
-            &String::from_str(&env, "DEP-SOLO-V"),
-            &f.farmer,
-            &f.warehouse,
-            &Symbol::new(&env, COMMODITY),
-            &Symbol::new(&env, GRADE),
-            &2_000u64,
-            &WeightSource::Scale,
-            &20u32,
-            &MOISTURE,
-        )
-        .is_err());
+    env.mock_auths(&[MockAuth { address: &f.verifier, invoke: &invoke }]);
+    assert!(f.client.try_mint_from_anchor(&f.custodian, &f.verifier, &leaf, &proof).is_err());
 }
 
-/// Both sign: the same call that failed twice above now succeeds, which is
-/// what makes the two failures above meaningful.
+/// The farmer cannot mint their own lot, even holding its proof.
+#[test]
+fn mint_fails_with_only_the_farmers_signature() {
+    let env = Env::default();
+    let f = setup(&env);
+    let (leaf, proof) = anchored(&env, &f, "DEP-FARMER");
+    let args = (f.custodian.clone(), f.verifier.clone(), leaf.clone(), proof.clone()).into_val(&env);
+    let invoke = mint_auth(&f, &args);
+
+    env.mock_auths(&[MockAuth { address: &f.farmer, invoke: &invoke }]);
+    assert!(f.client.try_mint_from_anchor(&f.custodian, &f.verifier, &leaf, &proof).is_err());
+}
+
+/// Both sign: the same call that failed above now succeeds, which is what
+/// makes those failures meaningful.
 #[test]
 fn mint_succeeds_with_both_signatures() {
     let env = Env::default();
     let f = setup(&env);
-    let args = mint_args(&env, &f, "DEP-BOTH");
+    let (leaf, proof) = anchored(&env, &f, "DEP-BOTH");
+    let args = (f.custodian.clone(), f.verifier.clone(), leaf.clone(), proof.clone()).into_val(&env);
+    let invoke = mint_auth(&f, &args);
 
     env.mock_auths(&[
-        MockAuth {
-            address: &f.custodian,
-            invoke: &MockAuthInvoke {
-                contract: &f.contract_id,
-                fn_name: "mint",
-                args: args.clone(),
-                sub_invokes: &[],
-            },
-        },
-        MockAuth {
-            address: &f.verifier,
-            invoke: &MockAuthInvoke {
-                contract: &f.contract_id,
-                fn_name: "mint",
-                args,
-                sub_invokes: &[],
-            },
-        },
+        MockAuth { address: &f.custodian, invoke: &invoke },
+        MockAuth { address: &f.verifier, invoke: &invoke },
     ]);
-
-    let id = f.client.mint(
-        &f.custodian,
-        &f.verifier,
-        &String::from_str(&env, "DEP-BOTH"),
-        &f.farmer,
-        &f.warehouse,
-        &Symbol::new(&env, COMMODITY),
-        &Symbol::new(&env, GRADE),
-        &2_000u64,
-        &WeightSource::Scale,
-        &20u32,
-        &MOISTURE,
-    );
-    assert_eq!(id, 1);
+    assert_eq!(f.client.mint_from_anchor(&f.custodian, &f.verifier, &leaf, &proof), 1);
 }
 
 // --- validation ------------------------------------------------------------
 
-#[test]
-fn mint_rejects_a_duplicate_deposit_id() {
-    let env = Env::default();
-    let f = setup(&env);
-
-    f.mint(&env, "DEP-0001");
-
-    let again = f.client.try_mint(
-        &f.custodian,
-        &f.verifier,
-        &String::from_str(&env, "DEP-0001"),
-        &f.farmer,
-        &f.warehouse,
-        &Symbol::new(&env, COMMODITY),
-        &Symbol::new(&env, GRADE),
-        &2_000u64,
-        &WeightSource::Scale,
-        &20u32,
-        &MOISTURE,
-    );
-    assert_eq!(again, Err(Ok(Error::DuplicateDepositId)));
-}
-
-/// A custodian registered for warehouse A cannot mint against warehouse B.
+/// A custodian registered for warehouse A cannot mint a lot of warehouse B.
 #[test]
 fn mint_rejects_a_custodian_registered_for_another_warehouse() {
     let env = Env::default();
@@ -260,80 +182,86 @@ fn mint_rejects_a_custodian_registered_for_another_warehouse() {
     f.client.add_warehouse(&other_warehouse);
     f.client.add_custodian(&other_warehouse, &other_custodian);
 
-    // f.custodian is registered for WAREHOUSE, not for other_warehouse.
-    let res = f.client.try_mint(
-        &f.custodian,
-        &f.verifier,
-        &String::from_str(&env, "DEP-XWH"),
-        &f.farmer,
-        &other_warehouse,
-        &Symbol::new(&env, COMMODITY),
-        &Symbol::new(&env, GRADE),
-        &2_000u64,
-        &WeightSource::Scale,
-        &20u32,
-        &MOISTURE,
+    let (leaf, proof) = anchored(&env, &f, "DEP-XWH");
+    assert_eq!(
+        f.client.try_mint_from_anchor(&other_custodian, &f.verifier, &leaf, &proof),
+        Err(Ok(Error::CustodianNotRegistered))
     );
-    assert_eq!(res, Err(Ok(Error::CustodianNotRegistered)));
-
-    // ...and the other custodian cannot mint against WAREHOUSE either.
-    let res = f.client.try_mint(
-        &other_custodian,
-        &f.verifier,
-        &String::from_str(&env, "DEP-XWH2"),
-        &f.farmer,
-        &f.warehouse,
-        &Symbol::new(&env, COMMODITY),
-        &Symbol::new(&env, GRADE),
-        &2_000u64,
-        &WeightSource::Scale,
-        &20u32,
-        &MOISTURE,
-    );
-    assert_eq!(res, Err(Ok(Error::CustodianNotRegistered)));
+    assert!(f.client.try_mint_from_anchor(&f.custodian, &f.verifier, &leaf, &proof).is_ok());
 }
 
 #[test]
 fn mint_rejects_an_unregistered_warehouse() {
     let env = Env::default();
-    let f = setup_bare(&env);
-
-    let res = f.client.try_mint(
-        &f.custodian,
-        &f.verifier,
-        &String::from_str(&env, "DEP-NOWH"),
-        &f.farmer,
-        &Symbol::new(&env, WAREHOUSE),
-        &Symbol::new(&env, COMMODITY),
-        &Symbol::new(&env, GRADE),
-        &2_000u64,
-        &WeightSource::Scale,
-        &20u32,
-        &MOISTURE,
+    let f = setup(&env);
+    let (mut leaf, proof) = anchored(&env, &f, "DEP-NOWH");
+    leaf.warehouse_id = Symbol::new(&env, "WH_NOWHERE");
+    assert_eq!(
+        f.client.try_mint_from_anchor(&f.custodian, &f.verifier, &leaf, &proof),
+        Err(Ok(Error::WarehouseNotRegistered))
     );
-    assert_eq!(res, Err(Ok(Error::WarehouseNotRegistered)));
+
+    let bare = setup_bare(&env);
+    let leaf = Leaf { warehouse_id: Symbol::new(&env, WAREHOUSE), ..leaf };
+    assert_eq!(
+        bare.client.try_mint_from_anchor(&bare.custodian, &bare.verifier, &leaf, &proof),
+        Err(Ok(Error::WarehouseNotRegistered))
+    );
 }
 
 #[test]
 fn mint_rejects_an_unregistered_verifier() {
     let env = Env::default();
     let f = setup(&env);
-
+    let (leaf, proof) = anchored(&env, &f, "DEP-NOV");
     let stranger = Address::generate(&env);
-    let res = f.client.try_mint(
-        &f.custodian,
-        &stranger,
-        &String::from_str(&env, "DEP-NOV"),
-        &f.farmer,
-        &f.warehouse,
-        &Symbol::new(&env, COMMODITY),
-        &Symbol::new(&env, GRADE),
-        &2_000u64,
-        &WeightSource::Scale,
-        &20u32,
-        &MOISTURE,
+    assert_eq!(
+        f.client.try_mint_from_anchor(&f.custodian, &stranger, &leaf, &proof),
+        Err(Ok(Error::VerifierNotRegistered))
     );
-    assert_eq!(res, Err(Ok(Error::VerifierNotRegistered)));
+}
+
+#[test]
+fn mint_rejects_a_warehouse_never_anchored() {
+    let env = Env::default();
+    let f = setup(&env);
+    let mut leaf = f.balance_leaf(&env, "DEP-0", 2_000, 20, WeightSource::Scale);
+    leaf.day = 1;
+    assert_eq!(
+        f.client.try_mint_from_anchor(&f.custodian, &f.verifier, &leaf, &Vec::new(&env)),
+        Err(Ok(Error::NoAnchor))
+    );
+}
+
+/// Day roots are temporary: once the latest one has expired (a warehouse
+/// not anchored for 30 days), nothing mints until the next anchor.
+#[test]
+fn mint_rejects_a_leaf_whose_day_root_has_expired() {
+    use soroban_sdk::testutils::Ledger as _;
+
+    let env = Env::default();
+    let f = setup(&env);
+    let (leaf, proof) = anchored(&env, &f, "DEP-OLD");
+    env.ledger().with_mut(|l| l.sequence_number += crate::storage::DAY_ROOT_TTL + 1);
+    assert!(!f.client.verify_leaf(&leaf, &proof));
+    assert_eq!(
+        f.client.try_mint_from_anchor(&f.custodian, &f.verifier, &leaf, &proof),
+        Err(Ok(Error::NoAnchor))
+    );
+}
+
+#[test]
+fn mint_rejects_an_unknown_leaf_version() {
+    let env = Env::default();
+    let f = setup(&env);
+    let mut leaf = f.balance_leaf(&env, "DEP-V", 2_000, 20, WeightSource::Scale);
+    leaf.version = 2;
+    let mut day = [leaf];
+    let proofs = f.anchor_next_day(&env, &mut day);
+    assert_eq!(
+        f.client.try_mint_from_anchor(&f.custodian, &f.verifier, &day[0], &proofs[0]),
+        Err(Ok(Error::UnsupportedLeafVersion))
+    );
 }
 
 #[test]
@@ -341,43 +269,57 @@ fn mint_rejects_invalid_measurements() {
     let env = Env::default();
     let f = setup(&env);
 
-    let mint = |deposit: &str, weight: u64, source: WeightSource, bags: u32, moisture: u32| {
-        f.client.try_mint(
-            &f.custodian,
-            &f.verifier,
-            &String::from_str(&env, deposit),
-            &f.farmer,
-            &f.warehouse,
-            &Symbol::new(&env, COMMODITY),
-            &Symbol::new(&env, GRADE),
-            &weight,
-            &source,
-            &bags,
-            &moisture,
-        )
+    let leaf = |id: &str, kg: u64, source: WeightSource, bags: u32, moisture: u32| {
+        let mut l = f.balance_leaf(&env, id, kg, bags, source);
+        l.moisture_bps = moisture;
+        l
     };
+    let mut day = [
+        leaf("DEP-W0", 0, WeightSource::Scale, 20, MOISTURE),
+        leaf("DEP-B0", 2_000, WeightSource::BagEstimate, 0, MOISTURE),
+        leaf("DEP-M", 2_000, WeightSource::Scale, 20, 10_001),
+        leaf("DEP-M-MAX", 2_000, WeightSource::Scale, 20, 10_000),
+        leaf("DEP-BULK", 2_000, WeightSource::Scale, 0, MOISTURE),
+        leaf(&"D".repeat(65), 2_000, WeightSource::Scale, 20, MOISTURE),
+        leaf(&"D".repeat(64), 2_000, WeightSource::Scale, 20, MOISTURE),
+    ];
+    let proofs = f.anchor_next_day(&env, &mut day);
+    let mint = |i: usize| f.client.try_mint_from_anchor(&f.custodian, &f.verifier, &day[i], &proofs[i]);
 
-    assert_eq!(
-        mint("DEP-W0", 0, WeightSource::Scale, 20, MOISTURE),
-        Err(Ok(Error::InvalidWeight)),
-        "zero weight"
-    );
-    assert_eq!(
-        mint("DEP-B0", 2_000, WeightSource::BagEstimate, 0, MOISTURE),
-        Err(Ok(Error::InvalidWeight)),
-        "bag estimate with no bags"
-    );
-    assert_eq!(
-        mint("DEP-M", 2_000, WeightSource::Scale, 20, 10_001),
-        Err(Ok(Error::InvalidMoisture)),
-        "moisture above 100.00%"
-    );
-
+    assert_eq!(mint(0), Err(Ok(Error::InvalidWeight)), "zero weight");
+    assert_eq!(mint(1), Err(Ok(Error::InvalidWeight)), "bag estimate with no bags");
+    assert_eq!(mint(2), Err(Ok(Error::InvalidMoisture)), "moisture above 100.00%");
     // The boundary itself is accepted: 100.00% is a reading, not an error.
-    assert!(mint("DEP-M-MAX", 2_000, WeightSource::Scale, 20, 10_000).is_ok());
-
+    assert!(mint(3).is_ok());
     // A scale-weighed lot with no bag count is legitimate (bulk intake).
-    assert!(mint("DEP-BULK", 2_000, WeightSource::Scale, 0, MOISTURE).is_ok());
+    assert!(mint(4).is_ok());
+    assert_eq!(mint(5), Err(Ok(Error::RefTooLong)), "deposit_id over 64 bytes");
+    assert!(mint(6).is_ok());
+}
+
+/// A rejected mint claims nothing: the lot can still mint once the problem
+/// is fixed.
+#[test]
+fn a_rejected_mint_leaves_the_lot_unclaimed() {
+    let env = Env::default();
+    let f = setup(&env);
+    let mut day = [
+        f.balance_leaf(&env, "DEP-RETRY", 2_000, 20, WeightSource::Scale),
+        f.balance_leaf(&env, "DEP-OTHER", 2_000, 20, WeightSource::Scale),
+    ];
+    let proofs = f.anchor_next_day(&env, &mut day);
+    let (leaf, proof) = (&day[0], &proofs[0]);
+    let mut wrong = proof.clone();
+    wrong.set(0, BytesN::from_array(&env, &[7; 32]));
+
+    assert_eq!(
+        f.client.try_mint_from_anchor(&f.custodian, &f.verifier, leaf, &wrong),
+        Err(Ok(Error::InvalidProof))
+    );
+    let stranger = Address::generate(&env);
+    assert!(f.client.try_mint_from_anchor(&f.custodian, &stranger, leaf, proof).is_err());
+    assert!(!f.client.is_claimed(&f.warehouse, &leaf.deposit_no));
+    assert!(f.client.try_mint_from_anchor(&f.custodian, &f.verifier, leaf, proof).is_ok());
 }
 
 #[test]
@@ -386,22 +328,30 @@ fn mint_emits_a_minted_event() {
 
     let env = Env::default();
     let f = setup(&env);
-    let id = f.mint(&env, "DEP-EVT");
+    let (leaf, proof) = anchored(&env, &f, "DEP-EVT");
+    let hash = f.client.leaf_hash(&leaf);
+    let id = f.client.mint_from_anchor(&f.custodian, &f.verifier, &leaf, &proof);
 
     let expected = crate::events::Minted {
         receipt_id: id,
         warehouse_id: f.warehouse.clone(),
+        deposit_no: leaf.deposit_no,
         deposit_id: String::from_str(&env, "DEP-EVT"),
         owner: f.farmer.clone(),
-        commodity: soroban_sdk::Symbol::new(&env, super::COMMODITY),
-        grade: soroban_sdk::Symbol::new(&env, super::GRADE),
+        commodity: Symbol::new(&env, super::COMMODITY),
+        grade: Symbol::new(&env, super::GRADE),
         weight_kg: 2_000,
-        weight_source: crate::WeightSource::Scale,
+        weight_source: WeightSource::Scale,
         bag_count: 20,
-        moisture_pct: super::MOISTURE,
+        moisture_pct: MOISTURE,
         custodian: f.custodian.clone(),
         verifier: f.verifier.clone(),
-        deposit_date: 0,
+        deposit_date: NOW,
+        minted_by_custodian: f.custodian.clone(),
+        minted_by_verifier: f.verifier.clone(),
+        anchor_day: leaf.day,
+        leaf_hash: hash,
+        minted_at: NOW,
     };
     assert_eq!(
         env.events().all(),

@@ -45,7 +45,7 @@ pub struct StoredRecovery(
 /// deposit_id, parent_id, commodity, grade, weight_kg, weight_source code,
 /// bag_count, moisture_pct, warehouse_id, custodian, verifier, owner, status
 /// code, lock (empty or one), recovery (empty or one), recovery_history,
-/// deposit_date, exit_date, exit_weight_kg.
+/// deposit_date, exit_date, exit_weight_kg, deposit_no.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredReceipt(
@@ -69,6 +69,7 @@ pub struct StoredReceipt(
     pub u64,
     pub Option<u64>,
     pub Option<u64>,
+    pub u64,
 );
 
 /// A [`Sale`] without its `sale_id`, in field order: data_version,
@@ -218,6 +219,7 @@ pub fn store_receipt(env: &Env, r: &Receipt) -> StoredReceipt {
         r.deposit_date,
         r.exit_date,
         r.exit_weight_kg,
+        r.deposit_no,
     )
 }
 
@@ -243,6 +245,7 @@ pub fn load_receipt(env: &Env, receipt_id: u64, s: StoredReceipt) -> Receipt {
         data_version: s.0,
         receipt_id,
         deposit_id: s.1,
+        deposit_no: s.20,
         parent_id: s.2,
         commodity: s.3,
         grade: s.4,

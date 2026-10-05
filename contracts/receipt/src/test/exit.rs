@@ -377,7 +377,7 @@ fn partial_exit_emits_split_then_exited() {
         weight_kg: 500,
         bag_count: 5,
         exit_weight_kg: 498,
-        exit_date: 0,
+        exit_date: env.ledger().timestamp(),
     };
 
     assert_eq!(

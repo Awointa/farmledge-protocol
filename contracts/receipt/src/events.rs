@@ -21,18 +21,24 @@
 //! weights**, because a split reduces the parent in place. The indexer must
 //! archive them; see `docs/archival.md`.
 
-use soroban_sdk::{contractevent, Address, Env, String, Symbol};
+use soroban_sdk::{contractevent, Address, BytesN, Env, String, Symbol};
 
 use crate::types::{Status, WeightSource};
 
 // --- receipt lifecycle -----------------------------------------------------
 
+/// A receipt minted from an anchored balance leaf. Every field from
+/// `deposit_no` to `deposit_date` is the leaf's (`custodian` and `verifier`
+/// attested the intake); `minted_by_custodian` and `minted_by_verifier`
+/// signed the mint. `anchor_day` and `leaf_hash` name the leaf, so anyone can
+/// check the receipt against the anchored books.
 #[contractevent]
 pub struct Minted {
     #[topic]
     pub receipt_id: u64,
     #[topic]
     pub warehouse_id: Symbol,
+    pub deposit_no: u64,
     pub deposit_id: String,
     pub owner: Address,
     pub commodity: Symbol,
@@ -44,6 +50,11 @@ pub struct Minted {
     pub custodian: Address,
     pub verifier: Address,
     pub deposit_date: u64,
+    pub minted_by_custodian: Address,
+    pub minted_by_verifier: Address,
+    pub anchor_day: u32,
+    pub leaf_hash: BytesN<32>,
+    pub minted_at: u64,
 }
 
 /// Emitted once per split. The parent keeps its id and becomes the
@@ -113,6 +124,36 @@ pub struct TtlExtended {
     pub status: Status,
     pub weight_kg: u64,
     pub extended_at: u64,
+}
+
+// --- anchoring -------------------------------------------------------------
+
+/// One day of a warehouse's books committed. `head` is
+/// `sha256(prev_head || day || leaves || root)`, with `day` and `leaves` as
+/// 4-byte big-endian and `prev_head` 32 zero bytes before the first anchor.
+/// **The only lasting record of `root`**: the stored day root expires after
+/// 30 days. The indexer must archive these.
+#[contractevent]
+pub struct Anchored {
+    #[topic]
+    pub warehouse_id: Symbol,
+    pub day: u32,
+    pub leaves: u32,
+    pub root: BytesN<32>,
+    pub prev_head: BytesN<32>,
+    pub head: BytesN<32>,
+    pub custodian: Address,
+    pub anchored_at: u64,
+}
+
+/// A deposit number claimed without a mint, so it can never be minted: a lot
+/// already held as a receipt on an earlier contract (audit finding A19).
+#[contractevent]
+pub struct Preclaimed {
+    #[topic]
+    pub warehouse_id: Symbol,
+    pub deposit_no: u64,
+    pub claimed_at: u64,
 }
 
 // --- lending ---------------------------------------------------------------

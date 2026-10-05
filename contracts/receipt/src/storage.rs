@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, Symbol, Vec};
 
 use crate::layout::{self, StoredReceipt, StoredSale};
 use crate::types::{Index, Receipt, Sale};
@@ -19,6 +19,14 @@ pub const ENTRY_TTL_EXTEND_TO: u32 = 175 * DAY_IN_LEDGERS;
 /// Instance storage (admin, id counter) is bumped on every state-changing call.
 pub const INSTANCE_TTL_THRESHOLD: u32 = 30 * DAY_IN_LEDGERS;
 pub const INSTANCE_TTL_EXTEND_TO: u32 = 175 * DAY_IN_LEDGERS;
+
+/// How long a day's root stays on-chain, in temporary storage. Long enough
+/// for the day after next to still mint from it if an anchor is late; after
+/// it the root lives on in the `Anchored` event and the head chain.
+pub const DAY_ROOT_TTL: u32 = 30 * DAY_IN_LEDGERS;
+
+/// Deposit numbers per claim-bitmap entry: 128 bytes, one bit each.
+pub const CLAIM_CHUNK_BITS: u64 = 1024;
 
 /// Receipt ids per index page. A page of 64 `u64`s is ~0.5KB, far under the
 /// 64KB per-entry ceiling, and a mint rewrites only the page it lands in
@@ -42,8 +50,19 @@ pub enum DataKey {
 
     // --- receipts ---
     Receipt(u64),
-    /// `deposit_id -> receipt_id`, the duplicate-mint guard.
-    DepositIndex(String),
+    /// The duplicate guard: one bit per `deposit_no` of one warehouse,
+    /// chunk `deposit_no / CLAIM_CHUNK_BITS`. Set by a mint or a pre-claim
+    /// and never cleared. **Persistent, never temporary**: expiry would
+    /// reopen every number in the chunk. Not kept alive either: an archived
+    /// chunk is restored when a mint reads it.
+    Claimed(Symbol, u64),
+
+    // --- anchoring ---
+    /// A warehouse's latest anchored day and hash-chain head. Persistent;
+    /// absent until its first anchor.
+    Head(Symbol),
+    /// One day's root and leaf count. **Temporary**, `DAY_ROOT_TTL`.
+    DayRoot(Symbol, u32),
 
     // --- paged secondary indexes ---
     OwnerIndex(Address, u32),
@@ -112,20 +131,74 @@ pub fn set_receipt(env: &Env, receipt: &Receipt) {
     bump(env, &key);
 }
 
-pub fn has_deposit_id(env: &Env, deposit_id: &String) -> bool {
-    env.storage()
-        .persistent()
-        .has(&DataKey::DepositIndex(deposit_id.clone()))
+// --- duplicate guard -------------------------------------------------------
+
+fn claim_key(warehouse_id: &Symbol, deposit_no: u64) -> (DataKey, u32) {
+    (
+        DataKey::Claimed(warehouse_id.clone(), deposit_no / CLAIM_CHUNK_BITS),
+        (deposit_no % CLAIM_CHUNK_BITS) as u32,
+    )
 }
 
-pub fn set_deposit_index(env: &Env, deposit_id: &String, receipt_id: u64) {
-    let key = DataKey::DepositIndex(deposit_id.clone());
-    env.storage().persistent().set(&key, &receipt_id);
+pub fn is_claimed(env: &Env, warehouse_id: &Symbol, deposit_no: u64) -> bool {
+    let (key, bit) = claim_key(warehouse_id, deposit_no);
+    let bits: Option<Bytes> = env.storage().persistent().get(&key);
+    bits.is_some_and(|b| b.get_unchecked(bit / 8) & (1 << (bit % 8)) != 0)
+}
+
+/// Claims `(warehouse_id, deposit_no)`; `false` if it already was.
+pub fn claim(env: &Env, warehouse_id: &Symbol, deposit_no: u64) -> bool {
+    let (key, bit) = claim_key(warehouse_id, deposit_no);
+    let store = env.storage().persistent();
+    let mut bits: Bytes = store
+        .get(&key)
+        .unwrap_or(Bytes::from_array(env, &[0u8; (CLAIM_CHUNK_BITS / 8) as usize]));
+    let byte = bits.get_unchecked(bit / 8);
+    let mask = 1u8 << (bit % 8);
+    if byte & mask != 0 {
+        return false;
+    }
+    bits.set(bit / 8, byte | mask);
+    store.set(&key, &bits);
+    bump(env, &key);
+    true
+}
+
+// --- anchoring -------------------------------------------------------------
+
+/// [`DataKey::Head`]: last day anchored, head after it.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredHead(pub u32, pub BytesN<32>);
+
+/// [`DataKey::DayRoot`]: root, leaf count.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredDay(pub BytesN<32>, pub u32);
+
+pub fn get_head(env: &Env, warehouse_id: &Symbol) -> Option<StoredHead> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Head(warehouse_id.clone()))
+}
+
+pub fn set_head(env: &Env, warehouse_id: &Symbol, head: &StoredHead) {
+    let key = DataKey::Head(warehouse_id.clone());
+    env.storage().persistent().set(&key, head);
     bump(env, &key);
 }
 
-pub fn bump_deposit_index(env: &Env, deposit_id: &String) {
-    bump(env, &DataKey::DepositIndex(deposit_id.clone()));
+pub fn get_day_root(env: &Env, warehouse_id: &Symbol, day: u32) -> Option<StoredDay> {
+    env.storage()
+        .temporary()
+        .get(&DataKey::DayRoot(warehouse_id.clone(), day))
+}
+
+pub fn set_day_root(env: &Env, warehouse_id: &Symbol, day: u32, root: &StoredDay) {
+    let key = DataKey::DayRoot(warehouse_id.clone(), day);
+    let store = env.storage().temporary();
+    store.set(&key, root);
+    store.extend_ttl(&key, DAY_ROOT_TTL, DAY_ROOT_TTL);
 }
 
 /// Ids start at 1, so `0` is never a valid receipt id.

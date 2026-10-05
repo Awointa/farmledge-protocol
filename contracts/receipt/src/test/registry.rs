@@ -1,9 +1,9 @@
 use soroban_sdk::{
     testutils::{Address as _, MockAuth, MockAuthInvoke},
-    Address, Env, IntoVal, String, Symbol,
+    Address, Env, IntoVal, Symbol,
 };
 
-use super::{setup, setup_bare, COMMODITY, GRADE, MOISTURE, WAREHOUSE};
+use super::{setup, setup_bare, WAREHOUSE};
 use crate::{Error, ReceiptContract, ReceiptContractClient, WeightSource};
 
 #[test]
@@ -207,28 +207,37 @@ fn a_non_admin_cannot_touch_any_registry() {
 // --- registries actually gate minting --------------------------------------
 
 #[test]
-fn deregistering_a_custodian_stops_them_minting() {
+fn deregistering_a_custodian_stops_them_minting_and_anchoring() {
     let env = Env::default();
     let f = setup(&env);
 
     f.mint(&env, "DEP-BEFORE");
+    let mut day = [f.balance_leaf(&env, "DEP-AFTER", 2_000, 20, WeightSource::Scale)];
+    let proofs = f.anchor_next_day(&env, &mut day);
     f.client.remove_custodian(&f.warehouse, &f.custodian);
 
     assert_eq!(
-        f.client.try_mint(
-            &f.custodian,
-            &f.verifier,
-            &String::from_str(&env, "DEP-AFTER"),
-            &f.farmer,
-            &f.warehouse,
-            &Symbol::new(&env, COMMODITY),
-            &Symbol::new(&env, GRADE),
-            &2_000u64,
-            &WeightSource::Scale,
-            &20u32,
-            &MOISTURE,
-        ),
+        f.client.try_mint_from_anchor(&f.custodian, &f.verifier, &day[0], &proofs[0]),
         Err(Ok(Error::CustodianNotRegistered))
+    );
+    assert_eq!(
+        f.client.try_anchor(&f.custodian, &f.warehouse, &f.next_day(), &f.client.leaf_hash(&day[0]), &1),
+        Err(Ok(Error::CustodianNotRegistered))
+    );
+}
+
+#[test]
+fn deregistering_a_verifier_stops_them_minting() {
+    let env = Env::default();
+    let f = setup(&env);
+
+    let mut day = [f.balance_leaf(&env, "DEP-AFTER", 2_000, 20, WeightSource::Scale)];
+    let proofs = f.anchor_next_day(&env, &mut day);
+    f.client.remove_verifier(&f.verifier);
+
+    assert_eq!(
+        f.client.try_mint_from_anchor(&f.custodian, &f.verifier, &day[0], &proofs[0]),
+        Err(Ok(Error::VerifierNotRegistered))
     );
 }
 
@@ -238,22 +247,12 @@ fn deregistering_a_warehouse_stops_minting_against_it() {
     let f = setup(&env);
 
     f.mint(&env, "DEP-BEFORE");
+    let mut day = [f.balance_leaf(&env, "DEP-AFTER", 2_000, 20, WeightSource::Scale)];
+    let proofs = f.anchor_next_day(&env, &mut day);
     f.client.remove_warehouse(&f.warehouse);
 
     assert_eq!(
-        f.client.try_mint(
-            &f.custodian,
-            &f.verifier,
-            &String::from_str(&env, "DEP-AFTER"),
-            &f.farmer,
-            &f.warehouse,
-            &Symbol::new(&env, COMMODITY),
-            &Symbol::new(&env, GRADE),
-            &2_000u64,
-            &WeightSource::Scale,
-            &20u32,
-            &MOISTURE,
-        ),
+        f.client.try_mint_from_anchor(&f.custodian, &f.verifier, &day[0], &proofs[0]),
         Err(Ok(Error::WarehouseNotRegistered)),
         "an orphaned custodian registration must not keep the warehouse alive"
     );

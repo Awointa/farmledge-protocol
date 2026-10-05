@@ -67,26 +67,6 @@ fn anyone_can_extend_ttl_without_authorisation() {
     assert_eq!(receipt_ttl(&env, &f, id), ENTRY_TTL_EXTEND_TO);
 }
 
-/// The duplicate-mint guard has to outlive the receipt it protects, otherwise
-/// an archived `deposit_id` entry would let the same intake be minted twice.
-#[test]
-fn extend_ttl_also_refreshes_the_deposit_id_guard() {
-    let env = Env::default();
-    let f = setup(&env);
-    let id = f.mint(&env, "DEP-0001");
-    let deposit_id = soroban_sdk::String::from_str(&env, "DEP-0001");
-
-    env.ledger().set_sequence_number(150 * DAY_IN_LEDGERS);
-    f.client.extend_ttl(&id);
-
-    let guard_ttl = env.as_contract(&f.contract_id, || {
-        env.storage()
-            .persistent()
-            .get_ttl(&DataKey::DepositIndex(deposit_id))
-    });
-    assert_eq!(guard_ttl, ENTRY_TTL_EXTEND_TO);
-}
-
 #[test]
 fn extend_ttl_rejects_an_unknown_receipt() {
     let env = Env::default();
@@ -430,16 +410,13 @@ fn extend_ttl_batch_skips_exited_and_revoked_receipts() {
     );
 
     assert_eq!(receipt_ttl(&env, &f, live), ENTRY_TTL_EXTEND_TO);
-    for (id, deposit) in [(exited, "DEP-EXITED"), (revoked, "DEP-REVOKED")] {
+    for id in [exited, revoked] {
         assert!(receipt_ttl(&env, &f, id) < ENTRY_TTL_THRESHOLD);
-        let guard = DataKey::DepositIndex(soroban_sdk::String::from_str(&env, deposit));
-        assert!(ttl_of(&env, &f, &guard) < ENTRY_TTL_THRESHOLD);
     }
 }
 
 /// After a partial exit the receipt that kept the rest is still live and
-/// still kept alive, along with the deposit guard it shares with the
-/// exited part.
+/// still kept alive.
 #[test]
 fn after_a_partial_exit_only_the_exited_part_is_left_to_archive() {
     let env = Env::default();
@@ -451,54 +428,35 @@ fn after_a_partial_exit_only_the_exited_part_is_left_to_archive() {
     assert_eq!(f.client.extend_ttl_batch(&ids(&env, &[id, gone])), 1);
     assert_eq!(receipt_ttl(&env, &f, id), ENTRY_TTL_EXTEND_TO);
     assert!(receipt_ttl(&env, &f, gone) < ENTRY_TTL_THRESHOLD);
-    let guard = DataKey::DepositIndex(soroban_sdk::String::from_str(&env, "DEP-PART"));
-    assert_eq!(ttl_of(&env, &f, &guard), ENTRY_TTL_EXTEND_TO);
 }
 
-/// Letting a finished receipt archive also lets its deposit guard archive.
-/// That must not reopen the deposit id: an archived guard is restored when
-/// the duplicate mint reads it, and the mint is still refused. The
-/// archived receipt itself reads back intact.
+/// Nothing keeps the claim bitmap alive, so a chunk whose lots have all
+/// exited ages out. That must not reopen its deposit numbers: an archived
+/// chunk is restored when the duplicate mint reads it, and the mint is
+/// still refused (audit finding A3). The archived receipt reads back intact.
 #[test]
-fn an_archived_deposit_guard_still_blocks_a_duplicate_mint() {
+fn an_archived_claim_chunk_still_blocks_a_duplicate_mint() {
     let env = Env::default();
     let f = setup(&env);
-    let id = f.mint(&env, "DEP-DONE");
+    let mut day = [f.balance_leaf(&env, "DEP-DONE", 2_000, 20, crate::WeightSource::Scale)];
+    let proofs = f.anchor_next_day(&env, &mut day);
+    let id = f.client.mint_from_anchor(&f.custodian, &f.verifier, &day[0], &proofs[0]);
     f.client.exit(&id, &f.custodian, &2_000, &1_990);
     let before = f.client.get_receipt(&id);
-    let keep_instance = f.mint(&env, "DEP-OTHER");
 
-    // The keep-alive skips the exited receipt, so its guard ages out.
-    env.ledger().set_sequence_number(150 * DAY_IN_LEDGERS);
-    assert_eq!(
-        f.client.extend_ttl_batch(&ids(&env, &[keep_instance, id])),
-        1
-    );
-    let guard = DataKey::DepositIndex(soroban_sdk::String::from_str(&env, "DEP-DONE"));
-    let live_until = 150 * DAY_IN_LEDGERS + ttl_of(&env, &f, &guard);
+    let chunk = DataKey::Claimed(f.warehouse.clone(), day[0].deposit_no / 1024);
+    let live_until = env.ledger().sequence() + ttl_of(&env, &f, &chunk);
     // Reading a TTL restores the entry, so archival is shown by arithmetic:
-    // the ledger moves past the guard's last live ledger.
+    // the ledger moves past the chunk's last live ledger.
     env.ledger()
         .set_sequence_number(ENTRY_TTL_EXTEND_TO + DAY_IN_LEDGERS);
-    assert!(
-        env.ledger().sequence() > live_until,
-        "the guard has archived"
-    );
+    assert!(env.ledger().sequence() > live_until, "the chunk has archived");
 
+    // The same lot again, in a fresh day's books.
+    let mut again = [day[0].clone()];
+    let proofs = f.anchor_next_day(&env, &mut again);
     assert_eq!(
-        f.client.try_mint(
-            &f.custodian,
-            &f.verifier,
-            &soroban_sdk::String::from_str(&env, "DEP-DONE"),
-            &f.farmer,
-            &f.warehouse,
-            &soroban_sdk::Symbol::new(&env, super::COMMODITY),
-            &soroban_sdk::Symbol::new(&env, super::GRADE),
-            &2_000,
-            &crate::WeightSource::Scale,
-            &20,
-            &super::MOISTURE,
-        ),
+        f.client.try_mint_from_anchor(&f.custodian, &f.verifier, &again[0], &proofs[0]),
         Err(Ok(Error::DuplicateDepositId))
     );
     assert_eq!(f.client.get_receipt(&id), before);

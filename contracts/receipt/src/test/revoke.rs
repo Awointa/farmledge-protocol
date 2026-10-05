@@ -136,7 +136,7 @@ fn revoke_emits_a_revoked_event() {
         owner: f.farmer.clone(),
         weight_kg: 2_000,
         reason,
-        revoked_at: 0,
+        revoked_at: super::NOW,
     };
     assert_eq!(
         env.events().all(),
