@@ -122,8 +122,12 @@ A+B was 0.0751 and 0.7194; the built contract comes within about 2%.
 point of pledge rate adds about 0.0024 XLM per deposit today (0.023 at
 10,000/KB). Anchors are per warehouse: 1.94 XLM per warehouse per year on
 mainnet today, 14.70 at 10,000/KB, so a warehouse with fewer deposits than
-50 a month pays more per deposit for them, and an idle warehouse need not
-be anchored at all.
+50 a month pays more per deposit for them. An idle warehouse is anchored
+too, every day, with a one-leaf sentinel day: a chain that starts at the
+first intake can't tell a new warehouse from one operating unrecorded, so
+every registered warehouse is anchored daily from its registration day
+(farmledge-app D53). Leaf count doesn't change the fee, since only the root
+goes on-chain, so a sentinel day costs what a 2,048-leaf day costs (below).
 
 | creating one claim chunk | 0.3209 | 0.0613 | 0.6127 |
 
@@ -139,6 +143,8 @@ The raw run, with the resources each transaction declared:
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | anchor — first day (creates the head), 2,048 leaves | 2,262,770 | 0.2263 | 2,248,507 | 14,163 | 1,119,951 | 0 | 340 | 4 / 2 | 408 | `7a075d921734` |
 | anchor — next day, 2,048 leaves | 205,800 | 0.0206 | 191,523 | 14,177 | 1,139,694 | 0 | 340 | 4 / 2 | 408 | `f4802e95c4c0` |
+| anchor — first day, 1-leaf sentinel (live, farmledge-app Testnet session) | 2,770,388 | 0.2770 | 2,750,200 | 20,088 | 1,642,247 | 144 | 408 | 5 / 3 | 404 | `07c85d92829d` |
+| anchor — first day, 2 leaves (live, same session) | 2,770,387 | 0.2770 | 2,750,200 | 20,087 | 1,640,408 | 144 | 408 | 5 / 3 | 404 | `776b52f31bf7` |
 | mint_from_anchor — first in its claim chunk (creates chunk, owner index), depth 11 | 16,109,509 | 1.6110 | 16,052,577 | 56,832 | 3,254,638 | 144 | 1,628 | 7 / 8 | 884 | `30769ce02eb7` |
 | mint_from_anchor — later lot, depth 11 | 5,975,076 | 0.5975 | 5,917,972 | 57,004 | 3,398,673 | 144 | 1,712 | 7 / 8 | 884 | `8fb2640ac532` |
 | preclaim — 25 numbers, creates their chunk | 3,242,920 | 0.3243 | 3,209,477 | 33,343 | 4,072,760 | 0 | 256 | 3 / 1 | 4,300 | `f1ac3ba4a741` |
@@ -160,6 +166,14 @@ The raw run, with the resources each transaction declared:
 | complete_recovery | 5,514,099 | 0.5514 | 5,473,327 | 40,672 | 2,588,553 | 144 | 2,172 | 3 / 9 | 560 | `51da3a0cd670` |
 | record_settlement | 274,142 | 0.0274 | 253,490 | 20,552 | 1,648,559 | 144 | 600 | 4 / 3 | 572 | `e4a1c5978ce4` |
 | unlock — full | 9,068 | 0.0009 | 0 | 8,968 | 955,083 | 0 | 456 | 2 / 1 | 384 | `5e56b8bf9f19` |
+
+The two live rows were measured on 10 Oct 2026 (contract `CBW6TA5U…`,
+ledgers 5,121,645 and 5,121,650). One leaf and two leaves cost the same, to
+within a stroop. They aren't directly comparable with the run's first-day row:
+that contract's anchor reads one more entry and writes one more (footprint
+5 / 3 against 4 / 2), and Testnet's rent rate drifts, so most of the
+difference is rent. The recurring cost of an idle warehouse is a next-day
+sentinel anchor, not yet measured live.
 
 ## The TTL policy
 
