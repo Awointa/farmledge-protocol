@@ -132,7 +132,9 @@ def check(b, rpc):
     try:
         leaf, proof = b["leaf"], [bytes.fromhex(p) for p in b["proof"]]
         day, n, idx = leaf["day"], b["day_leaves"], leaf["index"]
-        if not all(type(x) is int for x in (day, n, idx)): raise ValueError("day, day_leaves, index must be integers")
+        ints = [day, n, idx] + [leaf[k] for k, t in LEAF.items() if t in ("u32", "u64")]
+        ints += [x for d in b.get("later_days", []) for x in (d["day"], d["leaves"])]
+        if not all(type(x) is int for x in ints): raise ValueError("integer fields must be JSON integers")
         h = leaf_hash(leaf)
         prev = bytes.fromhex(b["prev_head"])
         later = [(d["day"], d["leaves"], bytes.fromhex(d["root"])) for d in b.get("later_days", [])]
@@ -180,6 +182,9 @@ def main():
         rpc = sys.argv[sys.argv.index("--rpc") + 1] if "--rpc" in sys.argv else b["rpc"]
     except Exception as e:
         finish("BAD_BUNDLE", f"{type(e).__name__}: {e}")
+    # The RPC is the one thing trusted. A bundle could name a server that lies.
+    print(f"rpc        {rpc}" + ("" if "--rpc" in sys.argv else
+          "  (named by the bundle: pass --rpc with an endpoint you chose)"))
     try:
         finish(check(b, rpc))
     except Outcome as o:

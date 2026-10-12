@@ -190,6 +190,9 @@ class Outcomes(unittest.TestCase):
         b = self.bundle(); b["leaf"]["owner"] = ACCOUNT[:-1] + "A"
         self.assertOutcome(b, "BAD_BUNDLE")
         self.assertOutcome(None, "BAD_BUNDLE", raw="{not json")
+        for bad in (True, 1000.0, "1000"):
+            b = self.bundle(); b["leaf"]["kg"] = bad
+            self.assertOutcome(b, "BAD_BUNDLE")
 
     def test_could_not_check_is_never_a_result(self):
         self.fresh()
