@@ -99,11 +99,12 @@ class Outcomes(unittest.TestCase):
         b.update(over)
         return b
 
-    def run_script(self, b, raw=None):
+    def run_script(self, b, raw=None, rpc=True):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
             fh.write(raw if raw is not None else json.dumps(b))
         try:
-            res = subprocess.run([sys.executable, SCRIPT, fh.name], capture_output=True, text=True, timeout=60)
+            res = subprocess.run([sys.executable, SCRIPT, fh.name, *(["--rpc", self.rpc] if rpc else [])],
+                                 capture_output=True, text=True, timeout=60)
         finally:
             os.unlink(fh.name)
         last = res.stdout.strip().splitlines()[-1]
@@ -114,8 +115,8 @@ class Outcomes(unittest.TestCase):
         self.chain.head(DAY, self.head)
         self.chain.day_root(DAY, self.root, 5)
 
-    def assertOutcome(self, b, code, raw=None):
-        got, status = self.run_script(b, raw)
+    def assertOutcome(self, b, code, raw=None, rpc=True):
+        got, status = self.run_script(b, raw, rpc)
         self.assertEqual(got, code)
         self.assertEqual(status, vp.OUTCOMES[code][0])
 
@@ -203,6 +204,25 @@ class Outcomes(unittest.TestCase):
             self.chain.head(DAY, None, raw=raw)
             self.chain.day_root(DAY, self.root, 5)
             self.assertOutcome(self.bundle(), "COULD_NOT_CHECK")
+
+    def test_the_bundles_rpc_is_never_dialled(self):
+        self.fresh()
+        self.assertOutcome(self.bundle(), "NO_RPC", rpc=False)  # even though the bundle names a working one
+        liar = Chain(); srv = serve(liar)  # would say NO_HEAD
+        try:
+            b = self.bundle(rpc=f"http://127.0.0.1:{srv.server_port}")
+            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh: json.dump(b, fh)
+            out = subprocess.run([sys.executable, SCRIPT, fh.name, "--rpc", self.rpc], capture_output=True, text=True).stdout
+            os.unlink(fh.name)
+            self.assertIn("RESULT OK", out)
+            self.assertIn(f"the bundle suggested http://127.0.0.1:{srv.server_port}, not used", out)
+            b["rpc"] = "http://x\x1b[2Jfake"
+            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh: json.dump(b, fh)
+            out = subprocess.run([sys.executable, SCRIPT, fh.name, "--rpc", self.rpc], capture_output=True, text=True).stdout
+            os.unlink(fh.name)
+            self.assertNotIn("\x1b", out)
+        finally:
+            srv.shutdown(); srv.server_close()
 
     def test_could_not_check_is_never_a_result(self):
         self.fresh()

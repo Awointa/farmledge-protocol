@@ -2,7 +2,10 @@
 """Check a Farmledge proof bundle against the Stellar chain, with nothing
 but Python's standard library and a public Stellar RPC.
 
-    python3 verify_proof.py bundle.json [--rpc URL]
+    python3 verify_proof.py bundle.json --rpc URL
+
+--rpc is required and is the one thing trusted. The bundle's own "rpc" field
+is a suggestion from whoever made the bundle: it is shown, never dialled.
 
 The last line printed is always `RESULT <CODE>`; the codes are in OUTCOMES
 below. Exit 0: the leaf was in the warehouse's anchored books for its day.
@@ -23,6 +26,7 @@ OUTCOMES = {
     "HEAD_MISMATCH": (1, "the head chain from the leaf's day does not reach the head on-chain"),
     "BAD_BUNDLE": (4, "the bundle is not a well-formed proof bundle"),
     "COULD_NOT_CHECK": (3, "the chain could not be read: this is no result at all"),
+    "NO_RPC": (5, "no --rpc given: choose the endpoint to check against; the bundle's is never used"),
 }
 
 class Outcome(Exception): pass
@@ -180,15 +184,19 @@ def check(b, rpc):
           f"in {leaf['warehouse_id']}'s books on day {day}")
     return "OK" if stored is not None else "DAY_ROOT_EXPIRED"
 
+def shown(x):  # a bundle's string, safe to print: no control characters
+    return "".join(c if c.isprintable() else "?" for c in x) if isinstance(x, str) else f"({type(x).__name__})"
+
 def main():
+    if "--rpc" not in sys.argv[2:-1]: finish("NO_RPC")
+    rpc = sys.argv[sys.argv.index("--rpc") + 1]
     try:
         b = json.load(open(sys.argv[1]))
-        rpc = sys.argv[sys.argv.index("--rpc") + 1] if "--rpc" in sys.argv else b["rpc"]
     except Exception as e:
         finish("BAD_BUNDLE", f"{type(e).__name__}: {e}")
-    # The RPC is the one thing trusted. A bundle could name a server that lies.
-    print(f"rpc        {rpc}" + ("" if "--rpc" in sys.argv else
-          "  (named by the bundle: pass --rpc with an endpoint you chose)"))
+    suggested = b.get("rpc") if isinstance(b, dict) else None
+    print(f"rpc        checked against {rpc}; " + ("the bundle names no endpoint" if suggested is None else
+          "the bundle suggested the same" if suggested == rpc else f"the bundle suggested {shown(suggested)}, not used"))
     try:
         finish(check(b, rpc))
     except Outcome as o:
