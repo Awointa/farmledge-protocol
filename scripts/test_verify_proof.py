@@ -48,9 +48,9 @@ class Chain:
             "key": base64.b64encode(lk).decode(), "xdr": base64.b64encode(data).decode(),
             "lastModifiedLedgerSeq": 5_000_000, "liveUntilLedgerSeq": live_until}
 
-    def head(self, last_day, head, **kw):
+    def head(self, last_day, head, raw=None, **kw):
         self.put(vp.sv("vec", [vp.sv("symbol", "Head"), vp.sv("symbol", WH)]), 1,
-                 vp.sv("vec", [vp.sv("u32", last_day), vp.sv("bytes", head)]), **kw)
+                 raw if raw is not None else vp.sv("vec", [vp.sv("u32", last_day), vp.sv("bytes", head)]), **kw)
 
     def day_root(self, day, root, leaves):
         self.put(vp.sv("vec", [vp.sv("symbol", "DayRoot"), vp.sv("symbol", WH), vp.sv("u32", day)]), 0,
@@ -194,6 +194,15 @@ class Outcomes(unittest.TestCase):
         for bad in (True, 1000.0, "1000"):
             b = self.bundle(); b["leaf"]["kg"] = bad
             self.assertOutcome(b, "BAD_BUNDLE")
+
+    def test_a_head_of_the_wrong_shape_is_no_result(self):
+        good = vp.sv("vec", [vp.sv("u32", DAY), vp.sv("bytes", self.head)])
+        for raw in (good[:-12], good + b"\0\0\0\0", vp.sv("vec", [vp.sv("u32", DAY), vp.sv("u32", 1)]),
+                    vp.sv("vec", [vp.sv("u32", DAY), vp.sv("bytes", self.head[:20])])):
+            self.chain.entries.clear()
+            self.chain.head(DAY, None, raw=raw)
+            self.chain.day_root(DAY, self.root, 5)
+            self.assertOutcome(self.bundle(), "COULD_NOT_CHECK")
 
     def test_could_not_check_is_never_a_result(self):
         self.fresh()

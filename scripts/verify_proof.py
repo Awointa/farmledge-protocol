@@ -117,16 +117,17 @@ def entry(rpc, contract, key, durability):  # -> (value ScVal bytes, ledger writ
     if not data.startswith(prefix): raise Outcome("COULD_NOT_CHECK", "unexpected entry layout")
     return data[len(prefix):], found[0].get("lastModifiedLedgerSeq")
 
-def vec_of(val):  # a Vec of Bytes / U32 values -> python list
-    if val[:8] != u32(16) + u32(1): raise Outcome("COULD_NOT_CHECK", "unexpected value type")
-    n, out, i = struct.unpack(">I", val[8:12])[0], [], 12
-    for _ in range(n):
-        t = struct.unpack(">I", val[i:i + 4])[0]
-        if t == 3: out.append(struct.unpack(">I", val[i + 4:i + 8])[0]); i += 8
-        elif t == 13:
-            ln = struct.unpack(">I", val[i + 4:i + 8])[0]
-            out.append(val[i + 8:i + 8 + ln]); i += 8 + ln + (-ln % 4)
-        else: raise Outcome("COULD_NOT_CHECK", f"ScVal type {t}")
+def vec_of(val, *types):  # exactly a Vec of these: "u32", or "bytes" of 32 -> python list
+    if val[:8] != u32(16) + u32(1) or struct.unpack(">I", val[8:12])[0] != len(types):
+        raise Outcome("COULD_NOT_CHECK", "unexpected value type")
+    out, i = [], 12
+    for t in types:
+        tag = struct.unpack(">I", val[i:i + 4])[0]
+        if t == "u32" and tag == 3: out.append(struct.unpack(">I", val[i + 4:i + 8])[0]); i += 8
+        elif t == "bytes" and tag == 13 and val[i + 4:i + 8] == u32(32) and len(val) >= i + 40:
+            out.append(val[i + 8:i + 40]); i += 40
+        else: raise Outcome("COULD_NOT_CHECK", f"unexpected value at byte {i}")
+    if i != len(val): raise Outcome("COULD_NOT_CHECK", "unexpected bytes after the value")
     return out
 
 def check(b, rpc):
@@ -155,7 +156,7 @@ def check(b, rpc):
     # The latest anchored day is in the warehouse's head; today is the chain's.
     stored = entry(rpc, b["contract_id"], sv("vec", [sv("symbol", "Head"), wh]), 1)
     if stored is None: raise Outcome("NO_HEAD", leaf["warehouse_id"])
-    last_day, on_chain_head = vec_of(stored[0])
+    last_day, on_chain_head = vec_of(stored[0], "u32", "bytes")
     today = int(rpc_call(rpc, "getLatestLedger", {})["closeTime"]) // 86400
     print(f"head       last anchored day {last_day}; chain's day now {today}")
     if day > today: raise Outcome("DAY_IN_FUTURE", f"day {day}")
@@ -163,7 +164,7 @@ def check(b, rpc):
 
     stored = entry(rpc, b["contract_id"], sv("vec", [sv("symbol", "DayRoot"), wh, sv("u32", day)]), 0)
     if stored is not None:
-        on_chain_root, leaves = vec_of(stored[0])
+        on_chain_root, leaves = vec_of(stored[0], "bytes", "u32")
         if (on_chain_root, leaves) != (root, n):
             raise Outcome("DAY_ROOT_DIFFERS", f"day {day}: on-chain {on_chain_root.hex()}, {leaves} leaves")
         print(f"day root   matches the root stored on-chain for day {day} (written in ledger {stored[1]})")
