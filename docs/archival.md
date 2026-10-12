@@ -601,8 +601,9 @@ one from the chain still works: the read restores it, at the reader's cost
 done. Measured against a job that renews every receipt of a deposit until
 the deposit's last receipt exits, for a deposit drawn down in tranches (a
 partial exit every two months, then a final exit), the receipts avoided are
-the exited tranches. Each is a 456-byte receipt. The deposit guard is shared
-with the live receipt and is kept alive either way.
+the exited tranches. Each is a 456-byte receipt. The duplicate guard is not
+kept alive at all: an archived chunk still blocks a duplicate mint (the
+`Claimed` row above).
 
 | deposit life | partial exits (days) | renewals avoided | Testnet | mainnet today | mainnet at 10,000/KB |
 |---|---|---:|---:|---:|---:|
@@ -711,4 +712,7 @@ bumping `DATA_VERSION`.
 `deposit_id` is capped at the same 64 bytes. A registered custodian supplies
 it, but in Phase 1 custodian keys are held by the backend, so registration
 is not the safeguard it sounds like. It is stored in every receipt of the
-deposit and is the deposit guard's key.
+deposit. It is **not** the duplicate guard's key: the guard is keyed on the
+proven leaf's `(warehouse_id, deposit_no)` (`storage::claim_key`, audit
+finding A1), so changing or reusing a `deposit_id` does not let a lot mint
+twice.
