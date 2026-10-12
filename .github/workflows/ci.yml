@@ -42,6 +42,14 @@ jobs:
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/stellar" --version
 
+      # The standalone verifier: every outcome, and the copy in the docs.
+      - name: Proof verifier
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_verify_proof.py' -v
+          python3 -c "import sys; sys.exit(open('scripts/verify_proof.py').read() not in open('docs/events.md').read())" \
+            || { echo "::error::docs/events.md must embed scripts/verify_proof.py verbatim"; exit 1; }
+          python3 scripts/check_events_doc.py
+
       - name: Format
         run: cargo fmt --all --check
 

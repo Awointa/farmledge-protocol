@@ -4,11 +4,33 @@ but Python's standard library and a public Stellar RPC.
 
     python3 verify_proof.py bundle.json [--rpc URL]
 
-Exit 0: the leaf was in the warehouse's anchored books for its day.
+The last line printed is always `RESULT <CODE>`; the codes are in OUTCOMES
+below. Exit 0: the leaf was in the warehouse's anchored books for its day.
 The bundle format is in docs/events.md ("Farmer proofs"). This file is
 copied verbatim into that document; it uses no Farmledge code or API.
 """
 import base64, hashlib, json, struct, sys, urllib.request
+
+# code: (exit status, what it means). Exit 0 is the only "verified".
+OUTCOMES = {
+    "OK": (0, "the root is on-chain for the leaf's day, and the head chain reaches the head on-chain"),
+    "DAY_ROOT_EXPIRED": (0, "the day's root has left the chain (after 30 days, as designed); verified through the head chain alone"),
+    "NOT_YET_ANCHORED": (2, "the warehouse has not anchored the leaf's day yet: not a failure, check again after the next anchor"),
+    "PROOF_DOES_NOT_FIT": (1, "the proof does not fit a tree of day_leaves leaves"),
+    "DAY_IN_FUTURE": (1, "the leaf's day is after the chain's current day, so it can never be anchored"),
+    "DAY_ROOT_DIFFERS": (1, "the root stored on-chain for the leaf's day is not the root this proof gives"),
+    "NO_HEAD": (1, "the warehouse has never anchored anything on-chain"),
+    "HEAD_MISMATCH": (1, "the head chain from the leaf's day does not reach the head on-chain"),
+    "BAD_BUNDLE": (4, "the bundle is not a well-formed proof bundle"),
+    "COULD_NOT_CHECK": (3, "the chain could not be read: this is no result at all"),
+}
+
+class Outcome(Exception): pass
+
+def finish(code, detail=""):
+    print(f"{code}: {OUTCOMES[code][1]}" + (f" ({detail})" if detail else ""))
+    print(f"RESULT {code}")
+    sys.exit(OUTCOMES[code][0])
 
 B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 
@@ -23,7 +45,7 @@ def strkey(s):  # G... account or C... contract -> (kind, 32 bytes)
             c = ((c << 1) ^ 0x1021 if c & 0x8000 else c << 1) & 0xFFFF
     kind = {6 << 3: "account", 2 << 3: "contract"}.get(body[0])
     if c != crc or kind is None or len(body) != 33:
-        sys.exit(f"bad address {s}")
+        raise ValueError(f"bad address {s}")
     return kind, body[1:]
 
 # --- XDR, just the ScVal types a leaf and its keys use ---------------------
@@ -71,22 +93,31 @@ def fold(h, index, proof):
 
 def chain(prev, day, leaves, root): return sha(prev, u32(day), u32(leaves), root)
 
-# --- reading two entries from the chain -----------------------------------
-def entry(rpc, contract, key, durability):  # -> value ScVal bytes, or None
-    lk = u32(6) + address(contract) + key + u32(durability)
+# --- reading the chain: any failure here is COULD_NOT_CHECK, never a result
+def rpc_call(rpc, method, params):
     req = urllib.request.Request(rpc, json.dumps({"jsonrpc": "2.0", "id": 1,
-        "method": "getLedgerEntries", "params": {"keys": [base64.b64encode(lk).decode()]}}).encode(),
-        {"content-type": "application/json", "user-agent": "verify-proof/1"})
-    found = json.load(urllib.request.urlopen(req, timeout=30))["result"].get("entries") or []
+        "method": method, "params": params}).encode(),
+        {"content-type": "application/json", "user-agent": "verify-proof/2"})
+    try:
+        reply = json.load(urllib.request.urlopen(req, timeout=30))
+        if "error" in reply: raise ValueError(reply["error"])
+        return reply["result"]
+    except Exception as e:
+        raise Outcome("COULD_NOT_CHECK", f"{method}: {e}")
+
+def entry(rpc, contract, key, durability):  # -> (value ScVal bytes, ledger written), or None
+    lk = u32(6) + address(contract) + key + u32(durability)
+    found = rpc_call(rpc, "getLedgerEntries", {"keys": [base64.b64encode(lk).decode()]}).get("entries") or []
     if not found: return None
+    # An archived entry is still returned, with its value: archived is not absent.
     data = base64.b64decode(found[0]["xdr"])
     # LedgerEntryData: type, ext, contract, key, durability, then the value.
     prefix = u32(6) + u32(0) + address(contract) + key + u32(durability)
-    assert data.startswith(prefix), "unexpected entry layout"
-    return data[len(prefix):]
+    if not data.startswith(prefix): raise Outcome("COULD_NOT_CHECK", "unexpected entry layout")
+    return data[len(prefix):], found[0].get("lastModifiedLedgerSeq")
 
 def vec_of(val):  # a Vec of Bytes / U32 values -> python list
-    assert val[:8] == u32(16) + u32(1)
+    if val[:8] != u32(16) + u32(1): raise Outcome("COULD_NOT_CHECK", "unexpected value type")
     n, out, i = struct.unpack(">I", val[8:12])[0], [], 12
     for _ in range(n):
         t = struct.unpack(">I", val[i:i + 4])[0]
@@ -94,40 +125,67 @@ def vec_of(val):  # a Vec of Bytes / U32 values -> python list
         elif t == 13:
             ln = struct.unpack(">I", val[i + 4:i + 8])[0]
             out.append(val[i + 8:i + 8 + ln]); i += 8 + ln + (-ln % 4)
-        else: raise ValueError(f"ScVal type {t}")
+        else: raise Outcome("COULD_NOT_CHECK", f"ScVal type {t}")
     return out
 
-def main():
-    b = json.load(open(sys.argv[1]))
-    rpc = sys.argv[sys.argv.index("--rpc") + 1] if "--rpc" in sys.argv else b["rpc"]
-    leaf, proof = b["leaf"], [bytes.fromhex(p) for p in b["proof"]]
-    if len(proof) != (b["day_leaves"] - 1).bit_length() or leaf["index"] >= b["day_leaves"]:
-        sys.exit("FAIL: the proof does not fit a tree of day_leaves leaves")
-    root = fold(leaf_hash(leaf), leaf["index"], proof)
-    wh = sv("symbol", leaf["warehouse_id"])
-    print(f"leaf hash  {leaf_hash(leaf).hex()}\nroot       {root.hex()}")
+def check(b, rpc):
+    try:
+        leaf, proof = b["leaf"], [bytes.fromhex(p) for p in b["proof"]]
+        day, n, idx = leaf["day"], b["day_leaves"], leaf["index"]
+        if not all(type(x) is int for x in (day, n, idx)): raise ValueError("day, day_leaves, index must be integers")
+        h = leaf_hash(leaf)
+        prev = bytes.fromhex(b["prev_head"])
+        later = [(d["day"], d["leaves"], bytes.fromhex(d["root"])) for d in b.get("later_days", [])]
+        for d in later: chain(prev, *d)  # rejects days or counts that are not u32
+        if any(len(x) != 32 for x in proof + [prev] + [d[2] for d in later]): raise ValueError("hashes are 32 bytes")
+        wh = sv("symbol", leaf["warehouse_id"])
+        address(b["contract_id"])
+    except Exception as e:
+        raise Outcome("BAD_BUNDLE", f"{type(e).__name__}: {e}")
+    if not 1 <= n <= 2 ** 20 or len(proof) != (n - 1).bit_length() or not 0 <= idx < n:
+        raise Outcome("PROOF_DOES_NOT_FIT", f"{len(proof)} siblings, index {idx}, {n} leaves")
+    root = fold(h, idx, proof)
+    print(f"leaf hash  {h.hex()}\nroot       {root.hex()}")
 
-    stored = entry(rpc, b["contract_id"], sv("vec", [sv("symbol", "DayRoot"), wh, sv("u32", leaf["day"])]), 0)
+    # The latest anchored day is in the warehouse's head; today is the chain's.
+    stored = entry(rpc, b["contract_id"], sv("vec", [sv("symbol", "Head"), wh]), 1)
+    if stored is None: raise Outcome("NO_HEAD", leaf["warehouse_id"])
+    last_day, on_chain_head = vec_of(stored[0])
+    today = int(rpc_call(rpc, "getLatestLedger", {})["closeTime"]) // 86400
+    print(f"head       last anchored day {last_day}; chain's day now {today}")
+    if day > today: raise Outcome("DAY_IN_FUTURE", f"day {day}")
+    if day > last_day: raise Outcome("NOT_YET_ANCHORED", f"day {day}, last anchored {last_day}")
+
+    stored = entry(rpc, b["contract_id"], sv("vec", [sv("symbol", "DayRoot"), wh, sv("u32", day)]), 0)
     if stored is not None:
-        on_chain_root, leaves = vec_of(stored)
-        ok = (on_chain_root, leaves) == (root, b["day_leaves"])
-        print(f"day root   {'matches' if ok else 'DIFFERS'} the root stored on-chain for day {leaf['day']}")
-        if not ok: sys.exit(1)
+        on_chain_root, leaves = vec_of(stored[0])
+        if (on_chain_root, leaves) != (root, n):
+            raise Outcome("DAY_ROOT_DIFFERS", f"day {day}: on-chain {on_chain_root.hex()}, {leaves} leaves")
+        print(f"day root   matches the root stored on-chain for day {day} (written in ledger {stored[1]})")
 
     # The head commits to every anchored day: recompute it from this day on.
-    head = chain(bytes.fromhex(b["prev_head"]), leaf["day"], b["day_leaves"], root)
-    for d in b.get("later_days", []):
-        head = chain(head, d["day"], d["leaves"], bytes.fromhex(d["root"]))
-    stored = entry(rpc, b["contract_id"], sv("vec", [sv("symbol", "Head"), wh]), 1)
-    if stored is None: sys.exit("FAIL: the warehouse has no anchor on-chain")
-    last_day, on_chain_head = vec_of(stored)
-    ok = on_chain_head == head
-    print(f"head       {'matches' if ok else 'DIFFERS from'} the head on-chain (last day {last_day})")
-    if not ok:
-        sys.exit("FAIL" + ("" if b.get("later_days") or last_day == leaf["day"] else
-                           ": later_days is missing the anchors after this day"))
-    print(f"OK: {leaf['kg']} kg, lot {leaf['deposit_no']}, kind {leaf['kind']}, "
-          f"in {leaf['warehouse_id']}'s books on day {leaf['day']}")
+    head = chain(prev, day, n, root)
+    for d in later: head = chain(head, *d)
+    if head != on_chain_head:
+        raise Outcome("HEAD_MISMATCH", "later_days is missing the anchors after this day"
+                      if not later and last_day != day else f"on-chain head {on_chain_head.hex()}")
+    print(f"head       matches the head on-chain (last day {last_day})")
+    print(f"{leaf['kg']} kg, lot {leaf['deposit_no']}, kind {leaf['kind']}, "
+          f"in {leaf['warehouse_id']}'s books on day {day}")
+    return "OK" if stored is not None else "DAY_ROOT_EXPIRED"
+
+def main():
+    try:
+        b = json.load(open(sys.argv[1]))
+        rpc = sys.argv[sys.argv.index("--rpc") + 1] if "--rpc" in sys.argv else b["rpc"]
+    except Exception as e:
+        finish("BAD_BUNDLE", f"{type(e).__name__}: {e}")
+    try:
+        finish(check(b, rpc))
+    except Outcome as o:
+        finish(*o.args)
+    except Exception as e:  # anything unforeseen in what the chain returned
+        finish("COULD_NOT_CHECK", f"{type(e).__name__}: {e}")
 
 if __name__ == "__main__":
     main()
