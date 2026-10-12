@@ -579,6 +579,8 @@ def vec_of(val):  # a Vec of Bytes / U32 values -> python list
 
 def check(b, rpc):
     try:
+        if not (isinstance(b, dict) and isinstance(b["leaf"], dict) and isinstance(b["proof"], list)
+                and isinstance(b.get("later_days", []), list)): raise ValueError("not a bundle's shape")
         leaf, proof = b["leaf"], [bytes.fromhex(p) for p in b["proof"]]
         day, n, idx = leaf["day"], b["day_leaves"], leaf["index"]
         ints = [day, n, idx] + [leaf[k] for k, t in LEAF.items() if t in ("u32", "u64")]
