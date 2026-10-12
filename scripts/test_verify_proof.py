@@ -187,8 +187,9 @@ class Outcomes(unittest.TestCase):
         self.fresh()
         b = self.bundle(); b["leaf"]["index"] = None  # a counter-slip leaf: no position yet
         self.assertOutcome(b, "BAD_BUNDLE")
-        b = self.bundle(); b["leaf"]["owner"] = ACCOUNT[:-1] + "A"
-        self.assertOutcome(b, "BAD_BUNDLE")
+        for bad in (ACCOUNT[:-1] + "A", ACCOUNT + "A", ACCOUNT[:-1]):
+            b = self.bundle(); b["leaf"]["owner"] = bad
+            self.assertOutcome(b, "BAD_BUNDLE")
         self.assertOutcome(None, "BAD_BUNDLE", raw="{not json")
         for bad in (True, 1000.0, "1000"):
             b = self.bundle(); b["leaf"]["kg"] = bad

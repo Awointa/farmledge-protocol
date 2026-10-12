@@ -35,6 +35,7 @@ def finish(code, detail=""):
 B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 
 def strkey(s):  # G... account or C... contract -> (kind, 32 bytes)
+    if len(s) != 56: raise ValueError(f"bad address {s}")  # 35 bytes exactly: one spelling per key
     bits = "".join(format(B32.index(c), "05b") for c in s)
     raw = bytes(int(bits[i:i + 8], 2) for i in range(0, len(bits) - 7, 8))
     body, crc = raw[:-2], int.from_bytes(raw[-2:], "little")
