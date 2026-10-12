@@ -356,7 +356,7 @@ def main():
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
             json.dump(bundle, fh)
         res = sh(sys.executable, os.path.join(os.path.dirname(__file__), "verify_proof.py"),
-                 fh.name, check=False)
+                 fh.name, "--rpc", net.rpc, check=False)
         os.unlink(fh.name)
         log(f"verify_proof.py, {label}:\n{res.stdout.strip()}")
         if res.returncode != 0:
